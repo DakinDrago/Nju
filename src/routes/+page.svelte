@@ -1,9 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { engines, dotClass } from "$lib/engines.svelte";
+  import { goto } from "$app/navigation";
+  import { engines, dotClass, localKey } from "$lib/engines.svelte";
   import { transcribe } from "$lib/transcribe";
   import { Button } from "$lib/components/ui/button";
   import { Card, CardHeader, CardTitle, CardContent } from "$lib/components/ui/card";
+  import {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuLabel,
+    DropdownMenuSeparator,
+  } from "$lib/components/ui/dropdown-menu";
   import { microphone } from "$lib/stores";
   import { settings } from "$lib/settings.svelte";
   import { Mic, MicOff, Copy, Check, AlertCircle, FileUp, Loader2 } from "lucide-svelte";
@@ -14,6 +23,12 @@
   const engineState = $derived(
     engines.active ? (engines.status[engines.active.id]?.state ?? "unknown") : "unknown",
   );
+
+  // Tous les moteurs (modèles locaux + serveurs) pour le sélecteur rapide
+  const allEngines = $derived([
+    ...engines.locals.map((m) => ({ id: localKey(m.id), name: m.name })),
+    ...engines.servers.map((s) => ({ id: s.id, name: s.name })),
+  ]);
 
   let status = $state("Prêt");
   let result = $state("");
@@ -259,15 +274,37 @@
   <h1 class="text-2xl font-semibold tracking-tight">Nouvelle transcription</h1>
   <p class="mt-2 mb-5 text-sm text-muted-foreground">Maintiens le bouton pour parler</p>
 
-  <!-- Model status indicator -->
+  <!-- Model status indicator + sélecteur rapide -->
   <div class="mb-6 flex items-center justify-center gap-2">
-    <a
-      href="/modeles"
-      class="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-    >
-      <span class={`size-2 rounded-full ${dotClass[engineState]}`}></span>
-      {engines.active?.name ?? "Aucun moteur"}
-    </a>
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        class="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        aria-label="Choisir le moteur de transcription"
+      >
+        <span class={`size-2 rounded-full ${dotClass[engineState]}`}></span>
+        {engines.active?.name ?? "Aucun moteur"}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="center" class="w-64">
+        <DropdownMenuLabel class="text-xs">Choisir un moteur</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {#each allEngines as e (e.id)}
+          {@const st = engines.status[e.id]?.state ?? "unknown"}
+          <DropdownMenuItem onSelect={() => engines.setActive(e.id)} class="gap-2">
+            <span class={`size-2 shrink-0 rounded-full ${dotClass[st]}`}></span>
+            <span class="truncate">{e.name}</span>
+            {#if engines.activeId === e.id}
+              <Check class="ml-auto h-3 w-3 shrink-0" />
+            {/if}
+          </DropdownMenuItem>
+        {:else}
+          <DropdownMenuItem disabled>Aucun moteur configuré</DropdownMenuItem>
+        {/each}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => goto("/modeles")} class="gap-2 text-muted-foreground">
+          Gérer les modèles…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
     
     {#if !modelLoaded}
       <div class="inline-flex items-center gap-1.5 rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-1.5 text-sm text-destructive">
