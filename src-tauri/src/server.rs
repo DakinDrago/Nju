@@ -48,8 +48,8 @@ fn describe(e: reqwest::Error) -> String {
     }
 }
 
-pub async fn check_server(cfg: &ServerConfig) -> Result<String, String> {
-    let client = build_client(cfg, 5)?;
+pub async fn check_server(cfg: &ServerConfig, timeout_secs: u64) -> Result<String, String> {
+    let client = build_client(cfg, timeout_secs.clamp(1, 120))?;
     let base = base_url(cfg);
     let mut last = String::from("Aucune réponse");
 
@@ -70,7 +70,7 @@ pub async fn check_server(cfg: &ServerConfig) -> Result<String, String> {
     Err(last)
 }
 
-pub async fn transcribe_with(cfg: &ServerConfig, audio: Vec<u8>) -> Result<String, String> {
+pub async fn transcribe_with(cfg: &ServerConfig, audio: Vec<u8>, timeout_secs: u64) -> Result<String, String> {
     let part = multipart::Part::bytes(audio)
         .file_name("recording.wav")
         .mime_str("audio/wav")
@@ -99,7 +99,7 @@ pub async fn transcribe_with(cfg: &ServerConfig, audio: Vec<u8>) -> Result<Strin
     }
 
     let url = format!("{}/v1/audio/transcriptions", base_url(cfg));
-    let resp = with_auth(build_client(cfg, 120)?.post(url), cfg)
+    let resp = with_auth(build_client(cfg, timeout_secs.clamp(10, 1800))?.post(url), cfg)
         .multipart(form)
         .send()
         .await
@@ -122,12 +122,16 @@ pub async fn transcribe_with(cfg: &ServerConfig, audio: Vec<u8>) -> Result<Strin
 }
 
 #[tauri::command]
-pub async fn test_server(config: ServerConfig) -> Result<String, String> {
-    check_server(&config).await
+pub async fn test_server(config: ServerConfig, timeout_secs: Option<u64>) -> Result<String, String> {
+    check_server(&config, timeout_secs.unwrap_or(5)).await
 }
 
 #[tauri::command]
-pub async fn transcribe_server(config: ServerConfig, audio_b64: String) -> Result<String, String> {
+pub async fn transcribe_server(
+    config: ServerConfig,
+    audio_b64: String,
+    timeout_secs: Option<u64>,
+) -> Result<String, String> {
     let audio = STANDARD.decode(audio_b64).map_err(|e| e.to_string())?;
-    transcribe_with(&config, audio).await
+    transcribe_with(&config, audio, timeout_secs.unwrap_or(120)).await
 }

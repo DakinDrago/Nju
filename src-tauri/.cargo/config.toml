@@ -1,0 +1,13 @@
+# Cargo configuration for maximum CPU compatibility
+# Uses "generic" target to work on ALL x86-64 CPUs (including old AMD FX, early Intel Core, etc.)
+# Runtime CPU feature detection will still enable optimizations on capable hardware
+
+[build]
+rustflags = [
+  "-C", "target-cpu=generic",
+]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C", "target-cpu=generic",
+]

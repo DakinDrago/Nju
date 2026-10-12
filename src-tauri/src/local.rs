@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -29,15 +28,15 @@ struct Loaded {
 /// Un seul modèle chargé à la fois (le précédent est libéré avant d'en charger un autre).
 pub struct LocalState {
     slot: Arc<Mutex<Option<Loaded>>>,
-    /// true = « Auto » (GPU si disponible, sinon CPU) ; false = CPU imposé.
-    prefer_gpu: Arc<AtomicBool>,
+    /// Mode de périphérique : "auto" (CUDA → DirectML → CPU), "cuda", "directml", "cpu".
+    device_mode: Arc<Mutex<String>>,
 }
 
 impl Default for LocalState {
     fn default() -> Self {
         Self {
             slot: Arc::new(Mutex::new(None)),
-            prefer_gpu: Arc::new(AtomicBool::new(true)),
+            device_mode: Arc::new(Mutex::new("auto".to_string())),
         }
     }
 }
@@ -80,40 +79,78 @@ fn dir_size_mb(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Crée la session ONNX. Le CPU fonctionne partout. Le GPU n'est tenté que si l'appli est compilée
-/// avec `--features gpu` et que « Auto » est choisi ; en cas d'échec (pas de carte NVIDIA, bibliothèques
-/// CUDA absentes...), on retombe sur le CPU et on le dit.
-fn make_session(path: &Path, prefer_gpu: bool) -> Result<(Session, String), String> {
-    let _ = prefer_gpu;
-    #[allow(unused_mut)]
-    let mut device = String::from("CPU");
-
-    #[cfg(feature = "gpu")]
-    {
-        if prefer_gpu {
+/// Crée la session ONNX. Ordre de préférence selon le mode :
+/// - "auto" : CUDA → DirectML → CPU
+/// - "cuda" : CUDA seulement → CPU si échec
+/// - "directml" : DirectML seulement → CPU si échec
+/// - "cpu" : CPU uniquement
+fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
+    // 1. Essaie CUDA si mode "auto" ou "cuda"
+    if mode == "auto" || mode == "cuda" {
+        #[cfg(feature = "gpu")]
+        {
             let attempt = Session::builder()
                 .and_then(|b| {
-                    b.with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
+                    Ok(b.with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])?)
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
                 Ok(session) => return Ok((session, "GPU (CUDA)".to_string())),
                 Err(e) => {
                     let why: String = e.to_string().chars().take(120).collect();
-                    device = format!("CPU (GPU indisponible : {why})");
+                    if mode == "cuda" {
+                        return Err(format!("CUDA requis mais indisponible : {why}"));
+                    }
+                    // mode == "auto" : on continue vers DirectML
+                    eprintln!("CUDA indisponible, tentative DirectML : {why}");
                 }
             }
         }
+        #[cfg(not(feature = "gpu"))]
+        if mode == "cuda" {
+            return Err("CUDA non compilé (feature 'gpu' absente)".into());
+        }
     }
 
+    // 2. Essaie DirectML si mode "auto" ou "directml"
+    if mode == "auto" || mode == "directml" {
+        #[cfg(feature = "gpu-directml")]
+        {
+            let attempt = Session::builder()
+                .and_then(|b| {
+                    Ok(b.with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])?)
+                })
+                .and_then(|mut b| b.commit_from_file(path));
+            match attempt {
+                Ok(session) => return Ok((session, "GPU (DirectML)".to_string())),
+                Err(e) => {
+                    let why: String = e.to_string().chars().take(120).collect();
+                    if mode == "directml" {
+                        return Err(format!("DirectML requis mais indisponible : {why}"));
+                    }
+                    // mode == "auto" : on continue vers CPU
+                    eprintln!("DirectML indisponible, fallback CPU : {why}");
+                }
+            }
+        }
+        #[cfg(not(feature = "gpu-directml"))]
+        if mode == "directml" {
+            return Err("DirectML non compilé (feature 'gpu-directml' absente)".into());
+        }
+        if mode == "auto" {
+            eprintln!("DirectML non compilé, fallback CPU");
+        }
+    }
+
+    // 3. CPU fallback
     let mut builder = Session::builder().map_err(|e| e.to_string())?;
     let session = builder
         .commit_from_file(path)
         .map_err(|e| format!("Chargement ONNX impossible : {e}"))?;
-    Ok((session, device))
+    Ok((session, "CPU".to_string()))
 }
 
-fn load_blocking(dir: &Path, name: &str, prefer_gpu: bool) -> Result<Loaded, String> {
+fn load_blocking(dir: &Path, name: &str, mode: &str) -> Result<Loaded, String> {
     for f in ["model.onnx", "vocab.json", "meta.json"] {
         if !dir.join(f).exists() {
             return Err(format!("Fichier manquant dans le dossier du modèle : {f}"));
@@ -123,7 +160,7 @@ fn load_blocking(dir: &Path, name: &str, prefer_gpu: bool) -> Result<Loaded, Str
     let vocab_json = fs::read_to_string(dir.join("vocab.json")).map_err(|e| e.to_string())?;
     let meta = ctc::load_meta(&meta_json, &vocab_json)?;
 
-    let (session, device) = make_session(&dir.join("model.onnx"), prefer_gpu)?;
+    let (session, device) = make_session(&dir.join("model.onnx"), mode)?;
 
     Ok(Loaded {
         name: name.to_string(),
@@ -137,13 +174,13 @@ fn ensure_loaded(
     slot: &mut Option<Loaded>,
     dir: &Path,
     name: &str,
-    prefer_gpu: bool,
+    mode: &str,
 ) -> Result<(), String> {
     if slot.as_ref().is_some_and(|l| l.name == name) {
         return Ok(());
     }
     *slot = None; // libère la mémoire de l'ancien modèle d'abord
-    *slot = Some(load_blocking(dir, name, prefer_gpu)?);
+    *slot = Some(load_blocking(dir, name, mode)?);
     Ok(())
 }
 
@@ -163,7 +200,7 @@ fn run_chunk(loaded: &mut Loaded, mut audio: Vec<f32>) -> Result<String, String>
     Ok(ctc::decode_greedy(logits, &loaded.meta))
 }
 
-fn transcribe_blocking(loaded: &mut Loaded, wav: &[u8]) -> Result<String, String> {
+fn transcribe_blocking(loaded: &mut Loaded, wav: &[u8], chunk_secs: f32) -> Result<String, String> {
     let (samples, rate) = ctc::parse_wav(wav)?;
     let audio = ctc::resample(&samples, rate, loaded.meta.sample_rate);
     if audio.len() < MIN_CHUNK_SAMPLES {
@@ -171,7 +208,7 @@ fn transcribe_blocking(loaded: &mut Loaded, wav: &[u8]) -> Result<String, String
     }
 
     let mut parts = Vec::new();
-    for (start, end) in ctc::split_chunks(&audio, loaded.meta.sample_rate, MAX_CHUNK_SECS) {
+    for (start, end) in ctc::split_chunks(&audio, loaded.meta.sample_rate, chunk_secs) {
         if end - start < MIN_CHUNK_SAMPLES {
             continue;
         }
@@ -218,10 +255,10 @@ pub async fn load_local_model(
 ) -> Result<String, String> {
     let dir = model_dir(&app, &model)?;
     let slot = state.slot.clone();
-    let prefer_gpu = state.prefer_gpu.load(Ordering::Relaxed);
+    let mode = state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())?.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
-        ensure_loaded(&mut guard, &dir, &model, prefer_gpu)?;
+        ensure_loaded(&mut guard, &dir, &model, &mode)?;
         let device = guard.as_ref().map(|l| l.device.clone()).unwrap_or_default();
         Ok(format!("Prêt · {device}"))
     })
@@ -235,16 +272,19 @@ pub async fn transcribe_local(
     state: State<'_, LocalState>,
     model: String,
     audio_b64: String,
+    chunk_secs: Option<f32>,
 ) -> Result<String, String> {
     let dir = model_dir(&app, &model)?;
     let wav = STANDARD.decode(audio_b64).map_err(|e| e.to_string())?;
     let slot = state.slot.clone();
-    let prefer_gpu = state.prefer_gpu.load(Ordering::Relaxed);
+    let mode = state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())?.clone();
+    // Durée max par morceau (réglable dans Paramètres), bornée pour rester raisonnable.
+    let chunk_secs = chunk_secs.unwrap_or(MAX_CHUNK_SECS).clamp(5.0, 120.0);
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
-        ensure_loaded(&mut guard, &dir, &model, prefer_gpu)?;
+        ensure_loaded(&mut guard, &dir, &model, &mode)?;
         let loaded = guard.as_mut().ok_or("Aucun modèle chargé")?;
-        transcribe_blocking(loaded, &wav)
+        transcribe_blocking(loaded, &wav, chunk_secs)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -303,11 +343,17 @@ pub async fn remove_local_model(
     .map_err(|e| e.to_string())?
 }
 
-/// Choisit le périphérique : "auto" (GPU si disponible) ou "cpu". Le modèle chargé est libéré
-/// pour que le prochain chargement applique le nouveau choix.
+/// Choisit le périphérique : "auto" (CUDA → DirectML → CPU), "cuda", "directml", "cpu".
+/// Le modèle chargé est libéré pour que le prochain chargement applique le nouveau choix.
 #[tauri::command]
 pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> Result<(), String> {
-    state.prefer_gpu.store(device != "cpu", Ordering::Relaxed);
+    // Valide le mode
+    let valid_modes = ["auto", "cuda", "directml", "cpu"];
+    if !valid_modes.contains(&device.as_str()) {
+        return Err(format!("Mode invalide : {device}. Modes valides : {}", valid_modes.join(", ")));
+    }
+    
+    *state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())? = device;
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;

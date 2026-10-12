@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { settings } from "./settings.svelte";
 
 export type ServerEngine = {
   id: string;
@@ -17,7 +18,7 @@ export type ActiveEngine =
   | ({ kind: "server" } & ServerEngine)
   | { kind: "local"; id: string; name: string };
 
-export type Device = "auto" | "cpu";
+export type Device = "auto" | "cuda" | "directml" | "cpu";
 
 export type EngineState = "unknown" | "checking" | "online" | "offline";
 export type Status = { state: EngineState; message: string };
@@ -73,7 +74,9 @@ class EngineStore {
         this.servers = saved.servers;
         this.activeId = saved.activeId ?? saved.servers[0].id;
       }
-      if (saved?.device === "cpu" || saved?.device === "auto") this.device = saved.device;
+      if (saved?.device && ["auto", "cuda", "directml", "cpu"].includes(saved.device)) {
+        this.device = saved.device;
+      }
     } catch {}
 
     if (this.servers.length === 0) {
@@ -188,7 +191,10 @@ class EngineStore {
     if (!s) return;
     this.status[id] = { state: "checking", message: "Test en cours..." };
     try {
-      const message = await invoke<string>("test_server", { config: toConfig(s) });
+      const message = await invoke<string>("test_server", {
+        config: toConfig(s),
+        timeoutSecs: settings.data.serverTestTimeout,
+      });
       this.status[id] = { state: "online", message };
     } catch (e) {
       this.status[id] = { state: "offline", message: String(e) };

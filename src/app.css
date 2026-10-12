@@ -1,6 +1,6 @@
-@import "tailwindcss";
+﻿@import "tailwindcss";
 
-/* Le mode sombre s'active avec la classe .dark sur <html> (voir lib/theme.svelte.ts) */
+/* Le mode sombre s'"'"'active avec la classe .dark sur <html> (voir lib/theme.svelte.ts) */
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
@@ -12,6 +12,22 @@
   --accent: oklch(0.58 0.19 250);
   --accent-foreground: oklch(1 0 0);
   --danger: oklch(0.6 0.22 25);
+  
+  /* shadcn-svelte required variables */
+  --primary: oklch(0.58 0.19 250);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.003 250);
+  --secondary-foreground: oklch(0.2 0.02 260);
+  --destructive: oklch(0.6 0.22 25);
+  --destructive-foreground: oklch(1 0 0);
+  --muted-foreground: oklch(0.52 0.02 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.02 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.02 260);
+  --ring: oklch(0.58 0.19 250 / 0.5);
+  --radius: 0.5rem;
+  --input: oklch(0.92 0.006 250);
 }
 
 .dark {
@@ -23,6 +39,21 @@
   --accent: oklch(0.74 0.13 225);
   --accent-foreground: oklch(0.18 0.02 260);
   --danger: oklch(0.68 0.2 25);
+  
+  /* shadcn-svelte required variables */
+  --primary: oklch(0.74 0.13 225);
+  --primary-foreground: oklch(0.18 0.02 260);
+  --secondary: oklch(0.26 0.014 260);
+  --secondary-foreground: oklch(0.96 0.005 250);
+  --destructive: oklch(0.68 0.2 25);
+  --destructive-foreground: oklch(1 0 0);
+  --muted-foreground: oklch(0.7 0.016 260);
+  --popover: oklch(0.19 0.014 260);
+  --popover-foreground: oklch(0.96 0.005 250);
+  --card: oklch(0.19 0.014 260);
+  --card-foreground: oklch(0.96 0.005 250);
+  --ring: oklch(0.74 0.13 225 / 0.5);
+  --input: oklch(0.28 0.014 260);
 }
 
 /* Noms de couleurs utilisables dans les classes : bg-surface, text-muted, border-border, bg-accent... */
@@ -35,6 +66,21 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-danger: var(--danger);
+  
+  /* shadcn-svelte colors */
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
 }
 
 @layer base {
@@ -46,5 +92,10 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+  }
+  
+  /* Focus ring for accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
   }
 }
