@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/* Le mode sombre s'active avec la classe .dark sur <html> (voir lib/theme.svelte.ts) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: oklch(0.985 0.003 250);
+  --surface: oklch(1 0 0);
+  --border: oklch(0.92 0.006 250);
+  --foreground: oklch(0.2 0.02 260);
+  --muted: oklch(0.52 0.02 260);
+  --accent: oklch(0.58 0.19 250);
+  --accent-foreground: oklch(1 0 0);
+  --danger: oklch(0.6 0.22 25);
+}
+
+.dark {
+  --background: oklch(0.15 0.012 260);
+  --surface: oklch(0.19 0.014 260);
+  --border: oklch(0.28 0.014 260);
+  --foreground: oklch(0.96 0.005 250);
+  --muted: oklch(0.7 0.016 260);
+  --accent: oklch(0.74 0.13 225);
+  --accent-foreground: oklch(0.18 0.02 260);
+  --danger: oklch(0.68 0.2 25);
+}
+
+/* Noms de couleurs utilisables dans les classes : bg-surface, text-muted, border-border, bg-accent... */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
