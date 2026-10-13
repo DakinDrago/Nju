@@ -1,6 +1,6 @@
 [package]
 name = "to-nju"
-version = "0.1.0"
+version = "0.1.1"
 description = "A speech-to-text app for fe'efe'e"
 authors = ["DakinDrago"]
 edition = "2024"
@@ -16,6 +16,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Téléchargement vérifié (sha256) de la lib ONNX Runtime partagée :
+# avec `load-dynamic`, ort-sys ne télécharge ni ne copie rien tout seul.
+ureq = "3"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+zip = "2"
+lzma-rust2 = { version = "0.15", default-features = false, features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -24,13 +32,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
+# Base sans EP (repli si un target n'a pas de surcharge ci-dessous).
+# Les deps par-OS ajoutent l'EP natif (features unifiées par Cargo).
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-single-instance = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Règle GPU : seul CUDA est opt-in explicite (`--features gpu`).
+# Chaque OS embarque son EP natif PAR DÉFAUT : DirectML (Windows),
+# WebGPU (Linux), CoreML (macOS). `gpu-directml` reste accepté
+# (compatibilité) mais n'est plus nécessaire sur Windows.
 [features]
 gpu = ["ort/cuda"]
 gpu-directml = ["ort/directml"]
@@ -46,7 +61,14 @@ strip = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
+# WebGPU (Vulkan) : EP natif par défaut sur Linux.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "webgpu"] }
 
-# DirectML n'existe que sur Windows : l'activer ailleurs casserait le build (ex. macOS).
+# DirectML n'existe que sur Windows : EP natif par défaut sur Windows.
 [target.'cfg(target_os = "windows")'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"] }
+
+# CoreML (Neural Engine/GPU Apple) : EP natif par défaut sur macOS.
+# Pas de dist CPU pyke pour x86_64-apple-darwin : Intel Mac = voir build.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "coreml"] }

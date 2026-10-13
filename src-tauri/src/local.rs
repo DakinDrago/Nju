@@ -28,7 +28,9 @@ struct Loaded {
 /// Un seul modèle chargé à la fois (le précédent est libéré avant d'en charger un autre).
 pub struct LocalState {
     slot: Arc<Mutex<Option<Loaded>>>,
-    /// Mode de périphérique : "auto" (CUDA → DirectML → CPU), "cuda", "directml", "cpu".
+    /// Mode de périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (opt-in
+    /// `--features gpu`), "directml" (Windows), "webgpu" (Linux),
+    /// "coreml" (macOS), "cpu" (universel).
     device_mode: Arc<Mutex<String>>,
 }
 
@@ -79,13 +81,53 @@ fn dir_size_mb(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Crée la session ONNX. Ordre de préférence selon le mode :
-/// - "auto" : CUDA → DirectML → CPU
-/// - "cuda" : CUDA seulement → CPU si échec
-/// - "directml" : DirectML seulement → CPU si échec
-/// - "cpu" : CPU uniquement
+/// Nom de la lib ONNX Runtime partagée par OS.
+fn ort_lib_filename() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    }
+}
+
+/// Localise la lib ONNX Runtime SANS appeler ort : si elle est introuvable,
+/// on renvoie une erreur propre au lieu du panic d'ort (`expect`, fatal avec
+/// `panic = "abort"` en release → exit 134). Miroir de la résolution d'ort :
+/// 1. `ORT_DYLIB_PATH` (posée par setup() pour les paquets, ou par l'utilisateur),
+/// 2. à côté de l'exécutable (dev / binaire direct, géré par build.rs).
+fn ort_library_path() -> Result<PathBuf, String> {
+    if let Ok(s) = std::env::var("ORT_DYLIB_PATH") {
+        if !s.is_empty() {
+            let p = PathBuf::from(&s);
+            return p.exists().then_some(p).ok_or_else(|| {
+                format!("ONNX Runtime introuvable : ORT_DYLIB_PATH pointe vers un fichier absent ({s})")
+            });
+        }
+    }
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("Impossible de localiser l'exécutable : {e}"))?
+        .parent()
+        .ok_or("Chemin d'exécutable invalide")?
+        .to_path_buf();
+    let p = exe_dir.join(ort_lib_filename());
+    if p.exists() {
+        return Ok(p);
+    }
+    Err("ONNX Runtime introuvable à côté de l'exécutable : réinstallez l'application (moteur local indisponible, le mode serveur reste utilisable)".into())
+}
+
+/// Crée la session ONNX. Ordre de préférence selon le mode et l'OS :
+/// - "auto" : Windows (CUDA → DirectML → CPU), Linux (CUDA → WebGPU → CPU), macOS (CoreML → CPU)
+/// - "cuda" : CUDA seulement (opt-in explicite `--features gpu`, sinon erreur)
+/// - "directml" / "webgpu" / "coreml" : EP natif de l'OS, erreur sinon
+/// - "cpu" : CPU uniquement (universel)
 fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
-    // 1. Essaie CUDA si mode "auto" ou "cuda"
+    // Vérifie la lib AVANT tout appel ort (voir ort_library_path).
+    ort_library_path()?;
+
+    // 1. Essaie CUDA si mode "auto" ou "cuda" (opt-in `--features gpu` uniquement).
     if mode == "auto" || mode == "cuda" {
         #[cfg(feature = "gpu")]
         {
@@ -101,20 +143,20 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                     if mode == "cuda" {
                         return Err(format!("CUDA requis mais indisponible : {why}"));
                     }
-                    // mode == "auto" : on continue vers DirectML
-                    eprintln!("CUDA indisponible, tentative DirectML : {why}");
+                    // mode == "auto" : on continue vers l'EP natif de l'OS
+                    eprintln!("CUDA indisponible, tentative suivante : {why}");
                 }
             }
         }
         #[cfg(not(feature = "gpu"))]
         if mode == "cuda" {
-            return Err("CUDA non compilé (feature 'gpu' absente)".into());
+            return Err("CUDA non compilé (build dédié `--features gpu` requis)".into());
         }
     }
 
-    // 2. Essaie DirectML si mode "auto" ou "directml"
+    // 2. Essaie DirectML si mode "auto" ou "directml" (Windows, natif par défaut).
     if mode == "auto" || mode == "directml" {
-        #[cfg(feature = "gpu-directml")]
+        #[cfg(target_os = "windows")]
         {
             let attempt = Session::builder()
                 .and_then(|b| {
@@ -133,12 +175,63 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                 }
             }
         }
-        #[cfg(not(feature = "gpu-directml"))]
+        #[cfg(not(target_os = "windows"))]
         if mode == "directml" {
-            return Err("DirectML non compilé (feature 'gpu-directml' absente)".into());
+            return Err("DirectML n'existe que sur Windows".into());
         }
-        if mode == "auto" {
-            eprintln!("DirectML non compilé, fallback CPU");
+    }
+
+    // 2b. Essaie WebGPU si mode "auto" ou "webgpu" (Linux, natif par défaut).
+    if mode == "auto" || mode == "webgpu" {
+        #[cfg(target_os = "linux")]
+        {
+            let attempt = Session::builder()
+                .and_then(|b| {
+                    Ok(b.with_execution_providers([ort::ep::WebGPU::default().build().error_on_failure()])?)
+                })
+                .and_then(|mut b| b.commit_from_file(path));
+            match attempt {
+                Ok(session) => return Ok((session, "GPU (WebGPU)".to_string())),
+                Err(e) => {
+                    let why: String = e.to_string().chars().take(120).collect();
+                    if mode == "webgpu" {
+                        return Err(format!("WebGPU requis mais indisponible : {why}"));
+                    }
+                    // mode == "auto" : on continue vers CPU
+                    eprintln!("WebGPU indisponible, fallback CPU : {why}");
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        if mode == "webgpu" {
+            return Err("WebGPU n'est proposé que sur Linux".into());
+        }
+    }
+
+    // 2c. Essaie CoreML si mode "auto" ou "coreml" (macOS, natif par défaut).
+    if mode == "auto" || mode == "coreml" {
+        #[cfg(target_os = "macos")]
+        {
+            let attempt = Session::builder()
+                .and_then(|b| {
+                    Ok(b.with_execution_providers([ort::ep::CoreML::default().build().error_on_failure()])?)
+                })
+                .and_then(|mut b| b.commit_from_file(path));
+            match attempt {
+                Ok(session) => return Ok((session, "GPU (CoreML)".to_string())),
+                Err(e) => {
+                    let why: String = e.to_string().chars().take(120).collect();
+                    if mode == "coreml" {
+                        return Err(format!("CoreML requis mais indisponible : {why}"));
+                    }
+                    // mode == "auto" : on continue vers CPU
+                    eprintln!("CoreML indisponible, fallback CPU : {why}");
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        if mode == "coreml" {
+            return Err("CoreML n'existe que sur macOS".into());
         }
     }
 
@@ -343,12 +436,14 @@ pub async fn remove_local_model(
     .map_err(|e| e.to_string())?
 }
 
-/// Choisit le périphérique : "auto" (CUDA → DirectML → CPU), "cuda", "directml", "cpu".
-/// Le modèle chargé est libéré pour que le prochain chargement applique le nouveau choix.
+/// Choisit le périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (opt-in
+/// `--features gpu` uniquement), "directml" (Windows), "webgpu" (Linux),
+/// "coreml" (macOS), "cpu" (universel). Le modèle chargé est libéré pour que
+/// le prochain chargement applique le nouveau choix.
 #[tauri::command]
 pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> Result<(), String> {
     // Valide le mode
-    let valid_modes = ["auto", "cuda", "directml", "cpu"];
+    let valid_modes = ["auto", "cuda", "directml", "webgpu", "coreml", "cpu"];
     if !valid_modes.contains(&device.as_str()) {
         return Err(format!("Mode invalide : {device}. Modes valides : {}", valid_modes.join(", ")));
     }

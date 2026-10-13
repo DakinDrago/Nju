@@ -272,7 +272,7 @@
 
 <div class="mx-auto flex min-h-full max-w-2xl flex-col items-center px-8 py-14 text-center">
   <h1 class="text-2xl font-semibold tracking-tight">Nouvelle transcription</h1>
-  <p class="mt-2 mb-5 text-sm text-muted-foreground">Maintiens le bouton pour parler</p>
+  <p class="mt-2 mb-5 text-sm text-muted-foreground">Maintenir le bouton pour parler</p>
 
   <!-- Model status indicator + sélecteur rapide -->
   <div class="mb-6 flex items-center justify-center gap-2">
@@ -331,7 +331,7 @@
     <span class="flex flex-col items-center gap-1">
       {#if recording}
         <Mic class="size-6" />
-        <span class="text-xs">Relâche</span>
+        <span class="text-xs">Relâcher</span>
       {:else}
         <MicOff class="size-6" />
         <span class="text-xs">Maintenir</span>

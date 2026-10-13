@@ -3,6 +3,7 @@
 
 use std::sync::Mutex;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -52,4 +53,29 @@ pub async fn set_run_in_background(state: State<'_, AppOptions>, enabled: bool) 
         .lock()
         .map_err(|_| "Verrou des options indisponible".to_string())? = enabled;
     Ok(())
+}
+
+/// Ce que ce binaire peut réellement utiliser : l'interface n'affiche
+/// que les modes GPU possibles. Seul CUDA est opt-in explicite
+/// (`--features gpu`) ; chaque OS embarque son EP natif par défaut
+/// (DirectML/Windows, WebGPU/Linux, CoreML/macOS).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    pub cuda: bool,
+    pub directml: bool,
+    pub webgpu: bool,
+    pub coreml: bool,
+    pub platform: String,
+}
+
+#[tauri::command]
+pub async fn get_capabilities() -> Result<Capabilities, String> {
+    Ok(Capabilities {
+        cuda: cfg!(feature = "gpu"),
+        directml: cfg!(target_os = "windows"),
+        webgpu: cfg!(target_os = "linux"),
+        coreml: cfg!(target_os = "macos"),
+        platform: std::env::consts::OS.to_string(),
+    })
 }

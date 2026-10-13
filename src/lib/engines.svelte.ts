@@ -18,7 +18,16 @@ export type ActiveEngine =
   | ({ kind: "server" } & ServerEngine)
   | { kind: "local"; id: string; name: string };
 
-export type Device = "auto" | "cuda" | "directml" | "cpu";
+export type Device = "auto" | "cuda" | "directml" | "webgpu" | "coreml" | "cpu";
+
+/** Ce que le binaire sait faire (voir `get_capabilities` côté Rust). */
+export type Capabilities = {
+  cuda: boolean;
+  directml: boolean;
+  webgpu: boolean;
+  coreml: boolean;
+  platform: string;
+};
 
 export type EngineState = "unknown" | "checking" | "online" | "offline";
 export type Status = { state: EngineState; message: string };
@@ -57,6 +66,7 @@ class EngineStore {
   activeId = $state<string | null>(null);
   device = $state<Device>("auto");
   status = $state<Record<string, Status>>({});
+  caps = $state<Capabilities>({ cuda: false, directml: false, webgpu: false, coreml: false, platform: "" });
 
   get active(): ActiveEngine | null {
     if (isLocalKey(this.activeId)) {
@@ -74,7 +84,7 @@ class EngineStore {
         this.servers = saved.servers;
         this.activeId = saved.activeId ?? saved.servers[0].id;
       }
-      if (saved?.device && ["auto", "cuda", "directml", "cpu"].includes(saved.device)) {
+      if (saved?.device && ["auto", "cuda", "directml", "webgpu", "coreml", "cpu"].includes(saved.device)) {
         this.device = saved.device;
       }
     } catch {}
@@ -87,6 +97,17 @@ class EngineStore {
       this.activeId = id;
       this.save();
     }
+
+    try {
+      this.caps = await invoke<Capabilities>("get_capabilities");
+    } catch (e) {
+      console.error(e);
+    }
+    // Si le mode sauvegardé n'est plus possible dans ce build, retour à Auto.
+    if (this.device === "cuda" && !this.caps.cuda) this.device = "auto";
+    if (this.device === "directml" && !this.caps.directml) this.device = "auto";
+    if (this.device === "webgpu" && !this.caps.webgpu) this.device = "auto";
+    if (this.device === "coreml" && !this.caps.coreml) this.device = "auto";
 
     try {
       await invoke("set_local_device", { device: this.device });

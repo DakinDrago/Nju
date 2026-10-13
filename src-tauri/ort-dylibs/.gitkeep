@@ -1,0 +1,5 @@
+# Ce dossier reçoit la lib ONNX Runtime partagée téléchargée par build.rs
+# (vérifiée par sha256, une par OS). Ne pas versionner les .dll/.so/.dylib :
+# ce marqueur garantit seulement que le glob `bundle.resources` trouve
+# toujours au moins un fichier, même hors-ligne (l'absence de la vraie lib
+# donne alors une erreur propre au chargement du modèle, pas un crash).

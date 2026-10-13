@@ -10,7 +10,7 @@
   import { Separator } from "$lib/components/ui/separator";
   import { Switch } from "$lib/components/ui/switch";
   import { Toaster } from "$lib/components/ui/sonner";
-  import { ChevronDown, ChevronUp, Plus, RotateCcw, Edit, Trash2, Check, X, Wifi, WifiOff, Cpu, Zap, Loader2, Monitor } from "lucide-svelte";
+  import { ChevronDown, ChevronUp, Plus, RotateCcw, Edit, Trash2, Check, X, Wifi, WifiOff, Cpu, Zap, Loader2, Monitor, Globe, Apple } from "lucide-svelte";
   import { cn } from "$lib/utils";
 
   const empty = { name: "", url: "http://", apiKey: "", model: "", language: "", insecure: false };
@@ -190,22 +190,46 @@
           <Zap class="mr-1 h-3 w-3" />
           Auto
         </Button>
-        <Button
-          variant={engines.device === "cuda" ? "default" : "ghost"}
-          size="sm"
-          onclick={() => engines.setDevice("cuda")}
-        >
-          <Cpu class="mr-1 h-3 w-3 text-green-500" />
-          CUDA
-        </Button>
-        <Button
-          variant={engines.device === "directml" ? "default" : "ghost"}
-          size="sm"
-          onclick={() => engines.setDevice("directml")}
-        >
-          <Monitor class="mr-1 h-3 w-3 text-blue-500" />
-          DirectML
-        </Button>
+        {#if engines.caps.cuda}
+          <Button
+            variant={engines.device === "cuda" ? "default" : "ghost"}
+            size="sm"
+            onclick={() => engines.setDevice("cuda")}
+          >
+            <Cpu class="mr-1 h-3 w-3 text-green-500" />
+            CUDA
+          </Button>
+        {/if}
+        {#if engines.caps.directml}
+          <Button
+            variant={engines.device === "directml" ? "default" : "ghost"}
+            size="sm"
+            onclick={() => engines.setDevice("directml")}
+          >
+            <Monitor class="mr-1 h-3 w-3 text-blue-500" />
+            DirectML
+          </Button>
+        {/if}
+        {#if engines.caps.webgpu}
+          <Button
+            variant={engines.device === "webgpu" ? "default" : "ghost"}
+            size="sm"
+            onclick={() => engines.setDevice("webgpu")}
+          >
+            <Globe class="mr-1 h-3 w-3 text-purple-500" />
+            WebGPU
+          </Button>
+        {/if}
+        {#if engines.caps.coreml}
+          <Button
+            variant={engines.device === "coreml" ? "default" : "ghost"}
+            size="sm"
+            onclick={() => engines.setDevice("coreml")}
+          >
+            <Apple class="mr-1 h-3 w-3" />
+            CoreML
+          </Button>
+        {/if}
         <Button
           variant={engines.device === "cpu" ? "default" : "ghost"}
           size="sm"
@@ -217,7 +241,17 @@
       </div>
     </div>
     <p class="mt-2 text-xs text-muted-foreground">
-      Auto : essaie CUDA → puis DirectML → puis CPU. CUDA = NVIDIA récent. DirectML = tout GPU DX12 (AMD/Intel/vieux NVIDIA). CPU = universel.
+      Auto : utilise le meilleur périphérique disponible, sinon le processeur. Le CPU fonctionne sur tous les ordinateurs.
+      {#if engines.caps.platform === "windows"}
+        CUDA (build dédié <span class="font-mono">--features gpu</span> uniquement) et DirectML (natif Windows) si disponibles.
+      {:else if engines.caps.platform === "linux"}
+        CUDA (build dédié <span class="font-mono">--features gpu</span> uniquement) et WebGPU (Vulkan, natif Linux) si disponibles.
+      {:else if engines.caps.platform === "macos"}
+        CoreML (Neural Engine/GPU Apple, natif macOS) si disponible. Pas de CUDA sur Mac.
+      {/if}
+      {#if !engines.caps.cuda && !engines.caps.directml && !engines.caps.webgpu && !engines.caps.coreml}
+        Ce build ne propose que le CPU (versions GPU : builds dédiés).
+      {/if}
     </p>
 
     <div class="space-y-3">

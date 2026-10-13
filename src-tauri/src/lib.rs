@@ -19,6 +19,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Instance unique : un 2e lancement réveille la fenêtre existante
+        // (même cachée en tray) au lieu d'un 2e process.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             server::test_server,
             server::transcribe_server
@@ -44,6 +52,28 @@ pub fn run() {
             // Initialise l'historique
             let history_state = history::init_history(app.handle())?;
             app.manage(history_state);
+
+            // Pointe ONNX Runtime vers la lib embarquée dans les paquets
+            // (AppImage/deb/dmg/msi via bundle.resources). En dev, la lib est
+            // à côté de l'exécutable (voir build.rs) et ort la trouve seul :
+            // on ne touche à rien sauf si la ressource existe vraiment.
+            // Doit arriver AVANT tout usage d'ort (chargement paresseux).
+            if std::env::var("ORT_DYLIB_PATH").unwrap_or_default().is_empty() {
+                if let Ok(res_dir) = app.path().resource_dir() {
+                    let name = if cfg!(target_os = "windows") {
+                        "onnxruntime.dll"
+                    } else if cfg!(target_os = "macos") {
+                        "libonnxruntime.dylib"
+                    } else {
+                        "libonnxruntime.so"
+                    };
+                    let candidate = res_dir.join("ort-dylibs").join(name);
+                    if candidate.exists() {
+                        // Sûr ici : setup() tourne avant tout thread utilisant l'env.
+                        unsafe { std::env::set_var("ORT_DYLIB_PATH", &candidate) };
+                    }
+                }
+            }
 
             // Raccourci global par défaut (l'interface applique ensuite les réglages
             // sauvegardés via `set_hotkey`). Échec non bloquant (Wayland, conflit...).
@@ -139,7 +169,8 @@ pub fn run() {
             history::export_mms_tsv,
             history::read_audio_file,
             options::set_hotkey,
-            options::set_run_in_background
+            options::set_run_in_background,
+            options::get_capabilities
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
