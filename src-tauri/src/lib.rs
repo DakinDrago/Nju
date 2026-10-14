@@ -29,11 +29,8 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![
-            server::test_server,
-            server::transcribe_server
-        ])
         .manage(options::AppOptions::default())
+        .manage(local::LocalState::default())
         .setup(|app| {
             #[cfg(target_os = "linux")]
             {
@@ -158,7 +155,6 @@ pub fn run() {
             }
             Ok(())
         })
-        .manage(local::LocalState::default())
         .invoke_handler(tauri::generate_handler![
             server::test_server,
             server::transcribe_server,
@@ -168,7 +164,10 @@ pub fn run() {
             local::transcribe_local,
             local::import_local_model,
             local::remove_local_model,
+            local::unload_local_model,
             local::set_local_device,
+            local::set_cpu_threads,
+            local::cancel_transcription,
             history::save_transcription,
             history::list_history,
             history::get_transcription,

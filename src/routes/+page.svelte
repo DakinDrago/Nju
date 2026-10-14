@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { engines, dotClass, localKey } from "$lib/engines.svelte";
-  import { transcribe } from "$lib/transcribe";
+  import { transcribe, cancelTranscription } from "$lib/transcribe";
   import { Button } from "$lib/components/ui/button";
   import { Card, CardHeader, CardTitle, CardContent } from "$lib/components/ui/card";
   import {
@@ -33,6 +33,8 @@
   let status = $state("Prêt");
   let result = $state("");
   let recording = $state(false);
+  let transcribing = $state(false);
+  let progress = $state<{ done: number; total: number } | null>(null);
   let copied = $state(false);
   let processingFile = $state(false);
   let dragOver = $state(false);
@@ -136,10 +138,16 @@
       }
 
       status = "Transcription en cours...";
+      transcribing = true;
+      progress = null;
       try {
         result = await transcribe(blob, {
           chunkSecs: settings.data.chunkSecs,
           timeoutSecs: settings.data.serverTranscribeTimeout,
+          onProgress: (done, total) => {
+            progress = { done, total };
+            status = total > 1 ? `Transcription ${done}/${total}…` : "Transcription en cours...";
+          },
         });
         status = "Terminé";
         copied = false;
@@ -156,6 +164,9 @@
         result = "Erreur : " + String(err);
         status = "Erreur";
         console.error(err);
+      } finally {
+        transcribing = false;
+        progress = null;
       }
     };
 
@@ -169,6 +180,10 @@
     if (!recording || !mediaRecorder) return;
     recording = false;
     mediaRecorder.stop();
+  }
+
+  async function cancel() {
+    await cancelTranscription();
   }
 
   async function copyToClipboard() {
@@ -229,10 +244,16 @@
     processingFile = true;
     startElapsedTimer();
     status = `Transcription de ${file.name} en cours...`;
+    transcribing = true;
+    progress = null;
     try {
       result = await transcribe(file, {
         chunkSecs: settings.data.chunkSecs,
         timeoutSecs: settings.data.serverTranscribeTimeout,
+        onProgress: (done, total) => {
+          progress = { done, total };
+          status = total > 1 ? `Transcription de ${file.name} ${done}/${total}…` : `Transcription de ${file.name} en cours...`;
+        },
       });
       status = "Terminé";
       copied = false;
@@ -251,6 +272,8 @@
       console.error(err);
     } finally {
       processingFile = false;
+      transcribing = false;
+      progress = null;
       stopElapsedTimer();
     }
   }
@@ -270,7 +293,7 @@
   }
 </script>
 
-<div class="mx-auto flex min-h-full max-w-2xl flex-col items-center px-8 py-14 text-center">
+<div class="mx-auto flex w-full max-w-2xl flex-col items-center px-4 py-8 text-center md:px-8 md:py-12">
   <h1 class="text-2xl font-semibold tracking-tight">Nouvelle transcription</h1>
   <p class="mt-2 mb-5 text-sm text-muted-foreground">Maintenir le bouton pour parler</p>
 
@@ -315,7 +338,7 @@
   </div>
 
   <Button
-    class="grid size-36 touch-none place-items-center rounded-full text-base font-medium shadow-lg transition select-none"
+    class="grid size-28 touch-none place-items-center rounded-full text-base font-medium shadow-lg transition select-none md:size-36"
     variant={recording ? "destructive" : "default"}
     size="icon"
     onpointerdown={(e) => {
@@ -341,6 +364,11 @@
 
   {#if !recording}
     <p class="mt-6 min-h-6 text-sm text-muted-foreground">{status}</p>
+    {#if transcribing}
+      <Button variant="outline" size="sm" onclick={cancel} class="mt-2">
+        Annuler
+      </Button>
+    {/if}
   {/if}
 
   <section class="mt-10 w-full text-left">
@@ -396,8 +424,17 @@
     >
       {#if processingFile}
         <Loader2 class="h-8 w-8 animate-spin text-accent" />
-        <p class="text-sm font-medium">Transcription en cours... {formatElapsed(elapsedSec)}</p>
+        <p class="text-sm font-medium">
+          {#if progress && progress.total > 1}
+            Transcription en cours... {progress.done}/{progress.total} morceaux · {formatElapsed(elapsedSec)}
+          {:else}
+            Transcription en cours... {formatElapsed(elapsedSec)}
+          {/if}
+        </p>
         <p class="text-xs text-muted-foreground">Les longs audios sont découpés automatiquement, patiente.</p>
+        <Button variant="outline" size="sm" onclick={cancel}>
+          Annuler
+        </Button>
       {:else}
         <FileUp class="h-8 w-8 text-muted-foreground" />
         <p class="text-sm font-medium">Glisse un fichier audio ici</p>

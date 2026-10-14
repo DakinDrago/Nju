@@ -7,9 +7,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ort::{session::Session, value::Tensor};
+use ort::{
+    session::{
+        Session,
+        builder::{BuilderResult, SessionBuilder},
+    },
+    value::Tensor,
+};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::ctc::{self, Meta};
 use crate::fsops;
@@ -21,17 +27,21 @@ struct Loaded {
     name: String,
     session: Session,
     meta: Meta,
-    /// Périphérique réellement utilisé, affiché dans l'interface (ex. « CPU », « GPU (CUDA) »).
+    /// Périphérique réellement utilisé, affiché dans l'interface (« CPU », « GPU »).
     device: String,
 }
 
 /// Un seul modèle chargé à la fois (le précédent est libéré avant d'en charger un autre).
 pub struct LocalState {
     slot: Arc<Mutex<Option<Loaded>>>,
-    /// Mode de périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (Windows/Linux,
-    /// opt-in `--features gpu`), "directml" (Windows), "webgpu" (Linux),
-    /// "coreml" (macOS), "cpu" (universel).
+    /// Mode de périphérique : "auto" (GPU si disponible, sinon CPU),
+    /// "gpu" (GPU requis, erreur sinon), "cpu" (universel).
     device_mode: Arc<Mutex<String>>,
+    /// Threads CPU imposés aux sessions ONNX (None = défaut ORT).
+    cpu_threads: Arc<Mutex<Option<usize>>>,
+    /// Génération de la transcription en cours : `cancel_transcription`
+    /// l'incrémente pour interrompre le découpage après le chunk courant.
+    run_id: Arc<Mutex<u64>>,
 }
 
 impl Default for LocalState {
@@ -39,6 +49,8 @@ impl Default for LocalState {
         Self {
             slot: Arc::new(Mutex::new(None)),
             device_mode: Arc::new(Mutex::new("auto".to_string())),
+            cpu_threads: Arc::new(Mutex::new(None)),
+            run_id: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -120,56 +132,79 @@ pub(crate) fn ort_library_path() -> Result<PathBuf, String> {
     Err("ONNX Runtime introuvable à côté de l'exécutable : réinstallez l'application (moteur local indisponible, le mode serveur reste utilisable)".into())
 }
 
-/// Crée la session ONNX. Ordre de préférence selon le mode et l'OS :
-/// - "auto" : Windows (CUDA → DirectML → CPU), Linux (CUDA → WebGPU → CPU), macOS (CoreML → CPU)
-/// - "cuda" : CUDA seulement (Windows/Linux, opt-in explicite `--features gpu`, sinon erreur)
-/// - "directml" / "webgpu" / "coreml" : EP natif de l'OS, erreur sinon
+/// Détecte une erreur d'allocation mémoire (RAM/VRAM pleine) dans un message ORT.
+fn is_oom_message(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "out of memory",
+        "out-of-memory",
+        "insufficient memory",
+        "not enough memory",
+        "failed to allocate",
+        "allocation failed",
+        "bad_alloc",
+        "bad alloc",
+        "memory budget",
+        "exceeds available",
+        "cuda error 2",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
+}
+
+/// Vrai si une erreur déjà mise en forme signale un manque de mémoire (déclenche le retry).
+fn is_oom_error(err: &str) -> bool {
+    err.starts_with("Mémoire insuffisante")
+}
+
+/// Erreur de chargement enrichie quand la cause est la mémoire.
+fn oom_load_error(e: impl ToString) -> String {
+    let full = e.to_string();
+    if is_oom_message(&full) {
+        let why: String = full.chars().take(120).collect();
+        format!(
+            "Mémoire insuffisante pour charger ce modèle (RAM/VRAM pleine). Ferme d'autres applis ou passe en CPU avec un morceau plus court. Détail : {why}"
+        )
+    } else {
+        format!("Chargement ONNX impossible : {full}")
+    }
+}
+
+/// Erreur d'inférence enrichie quand la cause est la mémoire.
+fn oom_infer_error(e: impl ToString) -> String {
+    let full = e.to_string();
+    if is_oom_message(&full) {
+        let why: String = full.chars().take(120).collect();
+        format!(
+            "Mémoire insuffisante pendant la transcription. Réessaie avec un réglage Morceau plus court, ou en CPU. Détail : {why}"
+        )
+    } else {
+        format!("Inférence ONNX : {full}")
+    }
+}
+
+/// Applique le nombre de threads CPU imposé (None = défaut ORT).
+fn apply_threads(b: SessionBuilder, threads: Option<usize>) -> BuilderResult {
+    match threads {
+        Some(n) => b.with_intra_threads(n),
+        None => Ok(b),
+    }
+}
+
+/// Crée la session ONNX. Ordre de préférence selon le mode :
+/// - "auto" : GPU natif de l'OS si disponible, sinon CPU
+/// - "gpu" : GPU natif seulement, erreur sinon
 /// - "cpu" : CPU uniquement (universel)
-/// Notes : pas de CUDA sur macOS (même en build gpu) ; en build gpu Linux,
-/// la lib -gpu MS n'a pas l'EP WebGPU (ordre réel : CUDA → CPU).
-fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
+fn make_session(path: &Path, mode: &str, threads: Option<usize>) -> Result<(Session, String), String> {
     // Vérifie la lib AVANT tout appel ort (voir ort_library_path).
     ort_library_path()?;
 
-    // 1. Essaie CUDA si mode "auto" ou "cuda" (Windows/Linux + opt-in `--features gpu`).
-    if mode == "auto" || mode == "cuda" {
-        #[cfg(all(feature = "gpu", any(target_os = "windows", target_os = "linux")))]
-        {
-            let attempt = Session::builder()
-                .and_then(|b| {
-                    Ok(b.with_execution_providers([ort::ep::CUDA::default()
-                        .build()
-                        .error_on_failure()])?)
-                })
-                .and_then(|mut b| b.commit_from_file(path));
-            match attempt {
-                Ok(session) => return Ok((session, "GPU (CUDA)".to_string())),
-                Err(e) => {
-                    let why: String = e.to_string().chars().take(120).collect();
-                    if mode == "cuda" {
-                        return Err(format!("CUDA requis mais indisponible : {why}"));
-                    }
-                    // mode == "auto" : on continue vers l'EP natif de l'OS
-                    eprintln!("CUDA indisponible, tentative suivante : {why}");
-                }
-            }
-        }
-        // Pas de CUDA sur macOS, même en build gpu (CoreML est l'EP natif).
-        #[cfg(target_os = "macos")]
-        if mode == "cuda" {
-            return Err("Pas de CUDA sur Mac (CoreML est l'EP natif, mode coreml/auto)".into());
-        }
-        #[cfg(all(not(feature = "gpu"), not(target_os = "macos")))]
-        if mode == "cuda" {
-            return Err("CUDA non compilé (build dédié `--features gpu` requis)".into());
-        }
-    }
-
-    // 2. Essaie DirectML si mode "auto" ou "directml" (Windows, natif par défaut).
-    if mode == "auto" || mode == "directml" {
+    // Essaie le GPU natif si mode "auto" ou "gpu".
+    if mode == "auto" || mode == "gpu" {
         #[cfg(target_os = "windows")]
         {
             let attempt = Session::builder()
+                .and_then(|b| Ok(apply_threads(b, threads)?))
                 .and_then(|b| {
                     Ok(b.with_execution_providers([ort::ep::DirectML::default()
                         .build()
@@ -177,28 +212,25 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
-                Ok(session) => return Ok((session, "GPU (DirectML)".to_string())),
+                Ok(session) => return Ok((session, "GPU".to_string())),
                 Err(e) => {
-                    let why: String = e.to_string().chars().take(120).collect();
-                    if mode == "directml" {
-                        return Err(format!("DirectML requis mais indisponible : {why}"));
+                    let full = e.to_string();
+                    if mode == "gpu" && is_oom_message(&full) {
+                        return Err(oom_load_error(&full));
+                    }
+                    let why: String = full.chars().take(120).collect();
+                    if mode == "gpu" {
+                        return Err(format!("GPU requis mais indisponible : {why}"));
                     }
                     // mode == "auto" : on continue vers CPU
-                    eprintln!("DirectML indisponible, fallback CPU : {why}");
+                    eprintln!("GPU indisponible, fallback CPU : {why}");
                 }
             }
         }
-        #[cfg(not(target_os = "windows"))]
-        if mode == "directml" {
-            return Err("DirectML n'existe que sur Windows".into());
-        }
-    }
-
-    // 2b. Essaie WebGPU si mode "auto" ou "webgpu" (Linux, natif par défaut).
-    if mode == "auto" || mode == "webgpu" {
         #[cfg(target_os = "linux")]
         {
             let attempt = Session::builder()
+                .and_then(|b| Ok(apply_threads(b, threads)?))
                 .and_then(|b| {
                     Ok(b.with_execution_providers([ort::ep::WebGPU::default()
                         .build()
@@ -206,28 +238,25 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
-                Ok(session) => return Ok((session, "GPU (WebGPU)".to_string())),
+                Ok(session) => return Ok((session, "GPU".to_string())),
                 Err(e) => {
-                    let why: String = e.to_string().chars().take(120).collect();
-                    if mode == "webgpu" {
-                        return Err(format!("WebGPU requis mais indisponible : {why}"));
+                    let full = e.to_string();
+                    if mode == "gpu" && is_oom_message(&full) {
+                        return Err(oom_load_error(&full));
+                    }
+                    let why: String = full.chars().take(120).collect();
+                    if mode == "gpu" {
+                        return Err(format!("GPU requis mais indisponible : {why}"));
                     }
                     // mode == "auto" : on continue vers CPU
-                    eprintln!("WebGPU indisponible, fallback CPU : {why}");
+                    eprintln!("GPU indisponible, fallback CPU : {why}");
                 }
             }
         }
-        #[cfg(not(target_os = "linux"))]
-        if mode == "webgpu" {
-            return Err("WebGPU n'est proposé que sur Linux".into());
-        }
-    }
-
-    // 2c. Essaie CoreML si mode "auto" ou "coreml" (macOS, natif par défaut).
-    if mode == "auto" || mode == "coreml" {
         #[cfg(target_os = "macos")]
         {
             let attempt = Session::builder()
+                .and_then(|b| Ok(apply_threads(b, threads)?))
                 .and_then(|b| {
                     Ok(b.with_execution_providers([ort::ep::CoreML::default()
                         .build()
@@ -235,32 +264,40 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
-                Ok(session) => return Ok((session, "GPU (CoreML)".to_string())),
+                Ok(session) => return Ok((session, "GPU".to_string())),
                 Err(e) => {
-                    let why: String = e.to_string().chars().take(120).collect();
-                    if mode == "coreml" {
-                        return Err(format!("CoreML requis mais indisponible : {why}"));
+                    let full = e.to_string();
+                    if mode == "gpu" && is_oom_message(&full) {
+                        return Err(oom_load_error(&full));
+                    }
+                    let why: String = full.chars().take(120).collect();
+                    if mode == "gpu" {
+                        return Err(format!("GPU requis mais indisponible : {why}"));
                     }
                     // mode == "auto" : on continue vers CPU
-                    eprintln!("CoreML indisponible, fallback CPU : {why}");
+                    eprintln!("GPU indisponible, fallback CPU : {why}");
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        if mode == "coreml" {
-            return Err("CoreML n'existe que sur macOS".into());
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        if mode == "gpu" {
+            return Err("GPU non pris en charge sur cet OS".into());
         }
     }
 
-    // 3. CPU fallback
-    let mut builder = Session::builder().map_err(|e| e.to_string())?;
-    let session = builder
-        .commit_from_file(path)
-        .map_err(|e| format!("Chargement ONNX impossible : {e}"))?;
+    // CPU (repli, ou choix explicite).
+    let builder = Session::builder().map_err(|e| e.to_string())?;
+    let mut builder = apply_threads(builder, threads).map_err(|e| e.to_string())?;
+    let session = builder.commit_from_file(path).map_err(oom_load_error)?;
     Ok((session, "CPU".to_string()))
 }
 
-fn load_blocking(dir: &Path, name: &str, mode: &str) -> Result<Loaded, String> {
+fn load_blocking(
+    dir: &Path,
+    name: &str,
+    mode: &str,
+    threads: Option<usize>,
+) -> Result<Loaded, String> {
     for f in ["model.onnx", "vocab.json", "meta.json"] {
         if !dir.join(f).exists() {
             return Err(format!("Fichier manquant dans le dossier du modèle : {f}"));
@@ -270,7 +307,7 @@ fn load_blocking(dir: &Path, name: &str, mode: &str) -> Result<Loaded, String> {
     let vocab_json = fs::read_to_string(dir.join("vocab.json")).map_err(|e| e.to_string())?;
     let meta = ctc::load_meta(&meta_json, &vocab_json)?;
 
-    let (session, device) = make_session(&dir.join("model.onnx"), mode)?;
+    let (session, device) = make_session(&dir.join("model.onnx"), mode, threads)?;
 
     Ok(Loaded {
         name: name.to_string(),
@@ -285,47 +322,111 @@ fn ensure_loaded(
     dir: &Path,
     name: &str,
     mode: &str,
+    threads: Option<usize>,
 ) -> Result<(), String> {
     if slot.as_ref().is_some_and(|l| l.name == name) {
         return Ok(());
     }
     *slot = None; // libère la mémoire de l'ancien modèle d'abord
-    *slot = Some(load_blocking(dir, name, mode)?);
+    *slot = Some(load_blocking(dir, name, mode, threads)?);
     Ok(())
 }
 
-fn run_chunk(loaded: &mut Loaded, mut audio: Vec<f32>) -> Result<String, String> {
+fn run_chunk(loaded: &mut Loaded, audio: &[f32]) -> Result<String, String> {
+    // Une seule copie : le Tensor exige un Vec possédé.
+    let mut buf = audio.to_vec();
     if loaded.meta.do_normalize {
-        ctc::normalize(&mut audio);
+        ctc::normalize(&mut buf);
     }
-    let n = audio.len();
-    let input = Tensor::from_array(([1_usize, n], audio)).map_err(|e| e.to_string())?;
+    let n = buf.len();
+    let input = Tensor::from_array(([1_usize, n], buf)).map_err(oom_infer_error)?;
     let outputs = loaded
         .session
         .run(ort::inputs![input])
-        .map_err(|e| format!("Inférence ONNX : {e}"))?;
+        .map_err(oom_infer_error)?;
     let (_shape, logits) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| e.to_string())?;
     Ok(ctc::decode_greedy(logits, &loaded.meta))
 }
 
-fn transcribe_blocking(loaded: &mut Loaded, wav: &[u8], chunk_secs: f32) -> Result<String, String> {
+/// Progression émise vers l'interface après chaque morceau transcrit.
+#[derive(Serialize, Clone)]
+struct TranscribeProgress {
+    done: usize,
+    total: usize,
+}
+
+fn transcribe_blocking(
+    loaded: &mut Loaded,
+    wav: &[u8],
+    chunk_secs: f32,
+    app: &AppHandle,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
     let (samples, rate) = ctc::parse_wav(wav)?;
     let audio = ctc::resample(&samples, rate, loaded.meta.sample_rate);
     if audio.len() < MIN_CHUNK_SAMPLES {
         return Err("Audio trop court".into());
     }
 
+    let chunks = ctc::split_chunks(&audio, loaded.meta.sample_rate, chunk_secs);
+    let total = chunks.len();
+    let emit = |done: usize| {
+        let _ = app.emit(
+            "transcribe-progress",
+            TranscribeProgress { done, total },
+        );
+    };
+    emit(0);
+
     let mut parts = Vec::new();
-    for (start, end) in ctc::split_chunks(&audio, loaded.meta.sample_rate, chunk_secs) {
+    for (i, (start, end)) in chunks.into_iter().enumerate() {
+        if is_cancelled() {
+            return Err("Transcription annulée".into());
+        }
         if end - start < MIN_CHUNK_SAMPLES {
+            emit(i + 1);
             continue;
         }
-        let text = run_chunk(loaded, audio[start..end].to_vec())?;
-        if !text.is_empty() {
-            parts.push(text);
+        match run_chunk(loaded, &audio[start..end]) {
+            Ok(text) => {
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+            // OOM sur un gros morceau : une seule recoupe en deux, sans récursion.
+            Err(e) if is_oom_error(&e) && end - start >= MIN_CHUNK_SAMPLES * 2 => {
+                let mid = start + (end - start) / 2;
+                let mut retried = Vec::new();
+                let mut failed: Option<String> = None;
+                for (s, e2) in [(start, mid), (mid, end)] {
+                    if is_cancelled() {
+                        return Err("Transcription annulée".into());
+                    }
+                    if e2 - s < MIN_CHUNK_SAMPLES {
+                        continue;
+                    }
+                    match run_chunk(loaded, &audio[s..e2]) {
+                        Ok(t) => {
+                            if !t.is_empty() {
+                                retried.push(t);
+                            }
+                        }
+                        Err(e2) => {
+                            failed = Some(e2);
+                            break;
+                        }
+                    }
+                }
+                if let Some(err) = failed {
+                    return Err(err);
+                }
+                parts.extend(retried);
+            }
+            Err(e) => return Err(e),
         }
+        emit(i + 1);
     }
     Ok(parts.join(" "))
 }
@@ -370,11 +471,16 @@ pub async fn load_local_model(
         .lock()
         .map_err(|_| "Verrou device_mode indisponible".to_string())?
         .clone();
+    let threads = state
+        .cpu_threads
+        .lock()
+        .map_err(|_| "Verrou cpu_threads indisponible".to_string())?
+        .clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut guard = slot
             .lock()
             .map_err(|_| "Verrou du modèle indisponible".to_string())?;
-        ensure_loaded(&mut guard, &dir, &model, &mode)?;
+        ensure_loaded(&mut guard, &dir, &model, &mode, threads)?;
         let device = guard.as_ref().map(|l| l.device.clone()).unwrap_or_default();
         Ok(format!("Prêt · {device}"))
     })
@@ -398,18 +504,46 @@ pub async fn transcribe_local(
         .lock()
         .map_err(|_| "Verrou device_mode indisponible".to_string())?
         .clone();
+    let threads = state
+        .cpu_threads
+        .lock()
+        .map_err(|_| "Verrou cpu_threads indisponible".to_string())?
+        .clone();
+    // Génération de cette transcription : `cancel_transcription` invalide les anciennes.
+    let my_id = {
+        let mut g = state
+            .run_id
+            .lock()
+            .map_err(|_| "Verrou run_id indisponible".to_string())?;
+        *g += 1;
+        *g
+    };
+    let run_id = state.run_id.clone();
     // Durée max par morceau (réglable dans Paramètres), bornée pour rester raisonnable.
     let chunk_secs = chunk_secs.unwrap_or(MAX_CHUNK_SECS).clamp(5.0, 120.0);
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut guard = slot
             .lock()
             .map_err(|_| "Verrou du modèle indisponible".to_string())?;
-        ensure_loaded(&mut guard, &dir, &model, &mode)?;
+        ensure_loaded(&mut guard, &dir, &model, &mode, threads)?;
         let loaded = guard.as_mut().ok_or("Aucun modèle chargé")?;
-        transcribe_blocking(loaded, &wav, chunk_secs)
+        transcribe_blocking(loaded, &wav, chunk_secs, &app, &|| {
+            run_id.lock().map(|g| *g != my_id).unwrap_or(false)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Interrompt la transcription locale en cours après le morceau courant.
+/// Sans effet s'il n'y en a pas (la prochaine transcription repart d'un id frais).
+#[tauri::command]
+pub async fn cancel_transcription(state: State<'_, LocalState>) -> Result<(), String> {
+    *state
+        .run_id
+        .lock()
+        .map_err(|_| "Verrou run_id indisponible".to_string())? += 1;
+    Ok(())
 }
 
 /// Importe un dossier exporté (model.onnx, vocab.json, meta.json) dans le dossier des modèles.
@@ -452,6 +586,31 @@ pub async fn import_local_model(
     .map_err(|e| e.to_string())?
 }
 
+/// Décharge le modèle local (libère la RAM). Si `model` est donné, ne décharge
+/// que si c'est lui qui est chargé. Renvoie si un modèle était chargé.
+#[tauri::command]
+pub async fn unload_local_model(
+    state: State<'_, LocalState>,
+    model: Option<String>,
+) -> Result<bool, String> {
+    let slot = state.slot.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        if let Some(name) = model {
+            if guard.as_ref().is_some_and(|l| l.name != name) {
+                return Ok(false);
+            }
+        }
+        let was = guard.is_some();
+        *guard = None;
+        Ok(was)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Retire un modèle de l'appli. Pour un lien, seul le lien est supprimé.
 #[tauri::command]
 pub async fn remove_local_model(
@@ -474,14 +633,13 @@ pub async fn remove_local_model(
     .map_err(|e| e.to_string())?
 }
 
-/// Choisit le périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (Windows/Linux,
-/// opt-in `--features gpu` uniquement), "directml" (Windows), "webgpu" (Linux),
-/// "coreml" (macOS), "cpu" (universel). Le modèle chargé est libéré pour que
+/// Choisit le périphérique : "auto" (GPU si disponible, sinon CPU),
+/// "gpu" (GPU requis), "cpu" (universel). Le modèle chargé est libéré pour que
 /// le prochain chargement applique le nouveau choix.
 #[tauri::command]
 pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> Result<(), String> {
     // Valide le mode
-    let valid_modes = ["auto", "cuda", "directml", "webgpu", "coreml", "cpu"];
+    let valid_modes = ["auto", "gpu", "cpu"];
     if !valid_modes.contains(&device.as_str()) {
         return Err(format!(
             "Mode invalide : {device}. Modes valides : {}",
@@ -493,6 +651,30 @@ pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> R
         .device_mode
         .lock()
         .map_err(|_| "Verrou device_mode indisponible".to_string())? = device;
+    let slot = state.slot.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        *guard = None;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Choisit les threads CPU des sessions ONNX : 0 = défaut ORT, sinon 1–64.
+/// Le modèle chargé est libéré pour que le prochain chargement applique le nouveau choix.
+#[tauri::command]
+pub async fn set_cpu_threads(state: State<'_, LocalState>, threads: u32) -> Result<(), String> {
+    if threads > 64 {
+        return Err(format!("Nombre de threads invalide : {threads} (0 = auto, max 64)"));
+    }
+    *state
+        .cpu_threads
+        .lock()
+        .map_err(|_| "Verrou cpu_threads indisponible".to_string())? =
+        if threads == 0 { None } else { Some(threads as usize) };
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut guard = slot

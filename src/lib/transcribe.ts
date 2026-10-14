@@ -1,4 +1,5 @@
 ﻿import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { engines, folderOf, toConfig } from "./engines.svelte";
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -123,10 +124,11 @@ function extensionForMime(mime: string): string {
 }
 
 /** Point d'entrée unique de l'interface : elle ne sait pas quel moteur répond.
-    `chunkSecs` (local) et `timeoutSecs` (serveur) viennent des Paramètres. */
+    `chunkSecs` (local) et `timeoutSecs` (serveur) viennent des Paramètres.
+    `onProgress` n'est appelé que pour le moteur local (morceaux traités / total). */
 export async function transcribe(
   audioBlob: Blob,
-  opts?: { extension?: string; chunkSecs?: number; timeoutSecs?: number },
+  opts?: { extension?: string; chunkSecs?: number; timeoutSecs?: number; onProgress?: (done: number, total: number) => void },
 ): Promise<string> {
   const engine = engines.active;
   if (!engine) throw new Error("Aucun moteur sélectionné (écran Modèles)");
@@ -149,18 +151,29 @@ export async function transcribe(
   const sampleRate = 16000;
 
   let text: string;
-  if (engine.kind === "local") {
-    text = await invoke<string>("transcribe_local", {
-      model: folderOf(engine.id),
-      audioB64,
-      chunkSecs: opts?.chunkSecs ?? 25,
-    });
-  } else {
-    text = await invoke<string>("transcribe_server", {
-      config: toConfig(engine),
-      audioB64,
-      timeoutSecs: opts?.timeoutSecs ?? 120,
-    });
+  let unlisten: (() => void) | null = null;
+  if (engine.kind === "local" && opts?.onProgress) {
+    const cb = opts.onProgress;
+    unlisten = await listen<{ done: number; total: number }>("transcribe-progress", (e) =>
+      cb(e.payload.done, e.payload.total),
+    );
+  }
+  try {
+    if (engine.kind === "local") {
+      text = await invoke<string>("transcribe_local", {
+        model: folderOf(engine.id),
+        audioB64,
+        chunkSecs: opts?.chunkSecs ?? 25,
+      });
+    } else {
+      text = await invoke<string>("transcribe_server", {
+        config: toConfig(engine),
+        audioB64,
+        timeoutSecs: opts?.timeoutSecs ?? 120,
+      });
+    }
+  } finally {
+    unlisten?.();
   }
 
   // Sauvegarde dans l'historique (garde le format original)
@@ -179,4 +192,13 @@ export async function transcribe(
   }
 
   return text;
+}
+
+/** Interrompt la transcription locale en cours (après le morceau courant). */
+export async function cancelTranscription() {
+  try {
+    await invoke("cancel_transcription");
+  } catch (e) {
+    console.warn("Annulation impossible:", e);
+  }
 }

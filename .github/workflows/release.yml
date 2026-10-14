@@ -9,10 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # Canal stable : builds CPU (+ EPs natifs : DirectML / WebGPU / CoreML).
-  # Ne tourne PAS sur les tags `-gpu` (pattern `v*` les matche aussi).
   release:
-    if: "!endsWith(github.ref_name, '-gpu')"
     strategy:
       fail-fast: false
       matrix:
@@ -63,59 +60,4 @@ jobs:
           releaseName: "to-nju ${{ github.ref_name }}"
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }}
-
-  # Canal GPU : builds `--features gpu` (EP CUDA, pilote NVIDIA requis).
-  # Tags `v*-gpu` (ex. `v0.3.0-gpu`). Windows + Linux uniquement (pas de CUDA
-  # sur Mac). En prerelease pour ne pas détourner le canal stable `latest`
-  # (les clients CPU resteraient sur la release stable).
-  release-gpu:
-    if: endsWith(github.ref_name, '-gpu')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            args: --features gpu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            args: --features gpu
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Install frontend deps
-        run: bun install --frozen-lockfile
-
-      - name: Build + Release (GPU)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "to-nju ${{ github.ref_name }} (GPU/CUDA)"
-          releaseDraft: false
-          prerelease: true
           args: ${{ matrix.args }}

@@ -195,7 +195,7 @@
 
 <Toaster />
 
-<div class="mx-auto max-w-4xl px-8 py-14">
+<div class="mx-auto max-w-4xl px-4 py-8 md:px-8 md:py-12">
   <div class="flex items-center justify-between gap-4 mb-8">
     <div class="flex items-center gap-2">
       <History class="h-6 w-6 text-muted-foreground" />

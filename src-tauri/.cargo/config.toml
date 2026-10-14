@@ -1,13 +1,21 @@
-# Cargo configuration for maximum CPU compatibility
+# Cargo configuration for maximum CPU compatibility on x86-64.
 # Uses "generic" target to work on ALL x86-64 CPUs (including old AMD FX, early Intel Core, etc.)
-# Runtime CPU feature detection will still enable optimizations on capable hardware
+# Runtime CPU feature detection will still enable optimizations on capable hardware.
+# NOTE: scoped to x86-64 only — aarch64 (notably Apple Silicon) must keep its
+# default target-cpu, otherwise `ring` fails to compile (E0080 assertions in
+# cpu/arm/darwin.rs about expected static CPU features).
 
-[build]
+[target.x86_64-unknown-linux-gnu]
 rustflags = [
   "-C", "target-cpu=generic",
 ]
 
 [target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C", "target-cpu=generic",
+]
+
+[target.x86_64-apple-darwin]
 rustflags = [
   "-C", "target-cpu=generic",
 ]

@@ -1,5 +1,50 @@
 ﻿@import "tailwindcss";
 
+/* Charis (successeur de Charis SIL, SIL OFL — voir static/fonts/OFL.txt),
+   auto-hébergée pour rester utilisable hors ligne. */
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Charis";
+  src: url("/fonts/Charis-BoldItalic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
 /* Le mode sombre s'"'"'active avec la classe .dark sur <html> (voir lib/theme.svelte.ts) */
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -58,6 +103,7 @@
 
 /* Noms de couleurs utilisables dans les classes : bg-surface, text-muted, border-border, bg-accent... */
 @theme inline {
+  --font-sans: "Charis", ui-sans-serif, system-ui, sans-serif;
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-border: var(--border);
@@ -92,6 +138,29 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+  }
+
+  /* Barre de défilement fine, assortie au thème (clair/sombre via les vars). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
   }
   
   /* Focus ring for accessibility */

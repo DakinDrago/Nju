@@ -34,7 +34,7 @@
 
 <div class="flex h-screen overflow-hidden">
   <Sidebar />
-  <main class="flex-1 overflow-y-auto flex flex-col">
+  <main class="flex min-h-0 flex-1 flex-col overflow-hidden">
     <header class="flex items-center justify-between px-4 py-3 border-b border-border bg-background/95 backdrop-blur-sm sticky top-0 z-10">
       <div class="flex items-center gap-4">
         <h1 class="text-lg font-semibold tracking-tight">Njū'</h1>
@@ -88,7 +88,7 @@
         </div>
       </div>
     </header>
-    <div class="flex-1 overflow-y-auto">
+    <div class="min-h-0 flex-1 overflow-y-auto">
       {@render children()}
     </div>
   </main>

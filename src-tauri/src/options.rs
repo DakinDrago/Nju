@@ -60,24 +60,20 @@ pub async fn set_run_in_background(
     Ok(())
 }
 
-/// Ce que ce binaire peut réellement utiliser : l'interface n'affiche
-/// que les modes GPU possibles. Seul CUDA est opt-in explicite
-/// (`--features gpu`) ; chaque OS embarque son EP natif par défaut
-/// (DirectML/Windows, WebGPU/Linux, CoreML/macOS).
+/// Ce que ce binaire peut réellement utiliser : l'interface propose
+/// GPU quand l'accélération native de l'OS est disponible, sinon CPU.
+/// Chaque OS embarque son EP natif.
 ///
-/// Chaque flag est une SONDE RUNTIME (et non un `cfg!` de compilation) :
-/// le flag Cargo seul ne suffit pas, car la lib ONNX Runtime chargée
+/// Le flag est une SONDE RUNTIME (et non un `cfg!` de compilation) :
+/// le feature Cargo seul ne suffit pas, car la lib ONNX Runtime chargée
 /// dynamiquement peut ne pas contenir l'EP — ex. lib officielle Microsoft
-/// sans EP WebGPU (erreur « not supported in this build ») alors que le
-/// code Rust est compilé avec le feature `webgpu`. Sans lib ORT trouvable,
+/// sans EP natif (erreur « not supported in this build ») alors que le
+/// code Rust est compilé avec le feature. Sans lib ORT trouvable,
 /// tout est à `false` (le moteur local est de toute façon indisponible).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    pub cuda: bool,
-    pub directml: bool,
-    pub webgpu: bool,
-    pub coreml: bool,
+    pub gpu: bool,
     pub platform: String,
 }
 
@@ -94,30 +90,18 @@ fn ep_available(probe: impl FnOnce() -> bool) -> bool {
 
 #[tauri::command]
 pub async fn get_capabilities() -> Result<Capabilities, String> {
-    // CUDA : opt-in `--features gpu` + présent dans la lib.
-    #[cfg(feature = "gpu")]
-    let cuda = ep_available(|| ort::ep::CUDA::default().is_available().unwrap_or(false));
-    #[cfg(not(feature = "gpu"))]
-    let cuda = false;
-    // EPs natifs par OS : le `cfg` garde la compilation par target, la sonde
+    // EP natif par OS : le `cfg` garde la compilation par target, la sonde
     // vérifie la lib réellement chargée.
     #[cfg(target_os = "windows")]
-    let directml = ep_available(|| ort::ep::DirectML::default().is_available().unwrap_or(false));
-    #[cfg(not(target_os = "windows"))]
-    let directml = false;
+    let gpu = ep_available(|| ort::ep::DirectML::default().is_available().unwrap_or(false));
     #[cfg(target_os = "linux")]
-    let webgpu = ep_available(|| ort::ep::WebGPU::default().is_available().unwrap_or(false));
-    #[cfg(not(target_os = "linux"))]
-    let webgpu = false;
+    let gpu = ep_available(|| ort::ep::WebGPU::default().is_available().unwrap_or(false));
     #[cfg(target_os = "macos")]
-    let coreml = ep_available(|| ort::ep::CoreML::default().is_available().unwrap_or(false));
-    #[cfg(not(target_os = "macos"))]
-    let coreml = false;
+    let gpu = ep_available(|| ort::ep::CoreML::default().is_available().unwrap_or(false));
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let gpu = false;
     Ok(Capabilities {
-        cuda,
-        directml,
-        webgpu,
-        coreml,
+        gpu,
         platform: std::env::consts::OS.to_string(),
     })
 }

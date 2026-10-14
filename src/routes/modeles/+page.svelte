@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { engines, dotClass, localKey, type ServerEngine } from "$lib/engines.svelte";
+  import { settings } from "$lib/settings.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "$lib/components/ui/card";
   import { Input } from "$lib/components/ui/input";
@@ -10,7 +11,7 @@
   import { Separator } from "$lib/components/ui/separator";
   import { Switch } from "$lib/components/ui/switch";
   import { Toaster } from "$lib/components/ui/sonner";
-  import { ChevronDown, ChevronUp, Plus, RotateCcw, Edit, Trash2, Check, X, Wifi, WifiOff, Cpu, Zap, Loader2, Monitor, Globe, Apple } from "lucide-svelte";
+  import { ChevronDown, Plus, RotateCcw, Edit, Trash2, WifiOff, Cpu, Zap, Loader2 } from "lucide-svelte";
   import { cn } from "$lib/utils";
 
   const empty = { name: "", url: "http://", apiKey: "", model: "", language: "", insecure: false };
@@ -131,7 +132,7 @@
   </Toaster.Toast>
 {/if}
 
-<div class="mx-auto max-w-2xl px-8 py-14">
+<div class="mx-auto max-w-2xl px-4 py-8 md:px-8 md:py-12">
   <h1 class="text-2xl font-semibold tracking-tight">Modèles</h1>
 
   <section class="mt-8 space-y-6">
@@ -190,44 +191,14 @@
           <Zap class="mr-1 h-3 w-3" />
           Auto
         </Button>
-        {#if engines.caps.cuda}
+        {#if engines.caps.gpu}
           <Button
-            variant={engines.device === "cuda" ? "default" : "ghost"}
+            variant={engines.device === "gpu" ? "default" : "ghost"}
             size="sm"
-            onclick={() => engines.setDevice("cuda")}
+            onclick={() => engines.setDevice("gpu")}
           >
-            <Cpu class="mr-1 h-3 w-3 text-green-500" />
-            CUDA
-          </Button>
-        {/if}
-        {#if engines.caps.directml}
-          <Button
-            variant={engines.device === "directml" ? "default" : "ghost"}
-            size="sm"
-            onclick={() => engines.setDevice("directml")}
-          >
-            <Monitor class="mr-1 h-3 w-3 text-blue-500" />
-            DirectML
-          </Button>
-        {/if}
-        {#if engines.caps.webgpu}
-          <Button
-            variant={engines.device === "webgpu" ? "default" : "ghost"}
-            size="sm"
-            onclick={() => engines.setDevice("webgpu")}
-          >
-            <Globe class="mr-1 h-3 w-3 text-purple-500" />
-            WebGPU
-          </Button>
-        {/if}
-        {#if engines.caps.coreml}
-          <Button
-            variant={engines.device === "coreml" ? "default" : "ghost"}
-            size="sm"
-            onclick={() => engines.setDevice("coreml")}
-          >
-            <Apple class="mr-1 h-3 w-3" />
-            CoreML
+            <Cpu class="mr-1 h-3 w-3" />
+            GPU
           </Button>
         {/if}
         <Button
@@ -239,18 +210,26 @@
           CPU
         </Button>
       </div>
+      <label class="inline-flex items-center gap-2 text-xs text-muted-foreground">
+        Threads
+        <select
+          class="rounded-md border border-border bg-card px-2 py-1 text-xs"
+          value={engines.cpuThreads}
+          onchange={(e) => engines.setCpuThreads(Number((e.target as HTMLSelectElement).value))}
+          aria-label="Threads CPU"
+        >
+          <option value={0}>Auto</option>
+          <option value={2}>2</option>
+          <option value={4}>4</option>
+          <option value={8}>8</option>
+        </select>
+      </label>
     </div>
     <p class="mt-2 text-xs text-muted-foreground">
-      Auto : utilise le meilleur périphérique disponible, sinon le processeur. Le CPU fonctionne sur tous les ordinateurs.
-      {#if engines.caps.platform === "windows"}
-        CUDA (build dédié <span class="font-mono">--features gpu</span> uniquement) et DirectML (natif Windows) si disponibles.
-      {:else if engines.caps.platform === "linux"}
-        CUDA (build dédié <span class="font-mono">--features gpu</span> uniquement) et WebGPU (Vulkan, natif Linux) si disponibles.
-      {:else if engines.caps.platform === "macos"}
-        CoreML (Neural Engine/GPU Apple, natif macOS) si disponible. Pas de CUDA sur Mac.
-      {/if}
-      {#if !engines.caps.cuda && !engines.caps.directml && !engines.caps.webgpu && !engines.caps.coreml}
-        Ce build ne propose que le CPU (versions GPU : builds dédiés).
+      Auto : utilise le GPU quand il est disponible, sinon le processeur. Le CPU fonctionne sur tous les ordinateurs.
+      Morceau : {settings.data.chunkSecs} s (réglable dans Paramètres).
+      {#if !engines.caps.gpu}
+        Ce build ne propose que le CPU sur cet ordinateur.
       {/if}
     </p>
 
@@ -278,6 +257,9 @@
                 </div>
                 <div class="mt-1 text-xs text-muted-foreground">{m.sizeMb} Mo · hors ligne, l'audio reste sur cet ordinateur</div>
                 <div class="mt-1 text-xs text-muted-foreground">{st.message}</div>
+                {#if st.state === "unknown" && engines.lastError[key]}
+                  <div class="mt-1 text-xs text-destructive">Dernier échec : {engines.lastError[key]}</div>
+                {/if}
               </div>
               <div class="flex shrink-0 items-center gap-2">
                 {#if !active}
@@ -289,10 +271,20 @@
                   >
                     Utiliser
                   </Button>
-                {:else if st.state === "offline"}
+                {:else if st.state === "offline" || (active && st.state === "unknown")}
                   <Button variant="outline" size="sm" onclick={() => engines.check(key)} class="h-7 px-2.5">
                     <RotateCcw class="mr-1 h-3 w-3" />
-                    Réessayer
+                    {st.state === "offline" ? "Réessayer" : "Charger"}
+                  </Button>
+                {/if}
+                {#if active && st.state === "online"}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onclick={() => engines.unmount(key)}
+                    class="h-7 px-2.5"
+                  >
+                    Décharger
                   </Button>
                 {/if}
                 <AlertDialog>

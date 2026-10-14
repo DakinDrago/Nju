@@ -83,7 +83,7 @@
   }
 </script>
 
-<div class="mx-auto max-w-2xl px-8 py-14 space-y-8">
+<div class="mx-auto max-w-2xl px-4 py-8 space-y-8 md:px-8 md:py-12">
   <div class="flex items-center justify-between">
     <h1 class="text-2xl font-semibold tracking-tight">Paramètres</h1>
     <Button variant="ghost" size="sm" onclick={resetAll}>

@@ -1,6 +1,6 @@
 [package]
 name = "to-nju"
-version = "0.2.0"
+version = "0.2.1"
 description = "A speech-to-text app for fe'efe'e"
 authors = ["DakinDrago"]
 edition = "2024"
@@ -43,15 +43,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-process = "2"
 
-# Règle GPU : seul CUDA est opt-in explicite (`--features gpu`, builds `-gpu`
-# dédiés via tags `v*-gpu`, pilote NVIDIA requis au runtime).
-# Chaque OS embarque son EP natif PAR DÉFAUT : DirectML (Windows),
+# Chaque OS embarque son EP natif : DirectML (Windows),
 # WebGPU (Linux, .so relinké depuis l'overlay pyke), CoreML (macOS).
-# En build gpu Linux, pas de WebGPU (lib MS -gpu) : ordre CUDA → CPU.
-# `gpu-directml` reste accepté (compatibilité) mais n'est plus nécessaire sur Windows.
 [features]
-gpu = ["ort/cuda"]
-gpu-directml = ["ort/directml"]
+default = []
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

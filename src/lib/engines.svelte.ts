@@ -18,14 +18,11 @@ export type ActiveEngine =
   | ({ kind: "server" } & ServerEngine)
   | { kind: "local"; id: string; name: string };
 
-export type Device = "auto" | "cuda" | "directml" | "webgpu" | "coreml" | "cpu";
+export type Device = "auto" | "gpu" | "cpu";
 
 /** Ce que le binaire sait faire (voir `get_capabilities` côté Rust). */
 export type Capabilities = {
-  cuda: boolean;
-  directml: boolean;
-  webgpu: boolean;
-  coreml: boolean;
+  gpu: boolean;
   platform: string;
 };
 
@@ -65,8 +62,12 @@ class EngineStore {
   modelsDir = $state("");
   activeId = $state<string | null>(null);
   device = $state<Device>("auto");
+  /** Threads CPU imposés (0 = auto). Appliqués au prochain chargement du modèle. */
+  cpuThreads = $state(0);
   status = $state<Record<string, Status>>({});
-  caps = $state<Capabilities>({ cuda: false, directml: false, webgpu: false, coreml: false, platform: "" });
+  /** Dernier message d'échec par modèle local (persiste au redémarrage). */
+  lastError = $state<Record<string, string>>({});
+  caps = $state<Capabilities>({ gpu: false, platform: "" });
 
   get active(): ActiveEngine | null {
     if (isLocalKey(this.activeId)) {
@@ -84,8 +85,17 @@ class EngineStore {
         this.servers = saved.servers;
         this.activeId = saved.activeId ?? saved.servers[0].id;
       }
-      if (saved?.device && ["auto", "cuda", "directml", "webgpu", "coreml", "cpu"].includes(saved.device)) {
+      if (saved?.device && ["auto", "gpu", "cpu"].includes(saved.device)) {
         this.device = saved.device;
+      } else if (saved?.device) {
+        // Valeur inconnue : repli sur Auto.
+        this.device = "auto";
+      }
+      if (typeof saved?.cpuThreads === "number" && Number.isFinite(saved.cpuThreads)) {
+        this.cpuThreads = Math.min(64, Math.max(0, Math.round(saved.cpuThreads)));
+      }
+      if (saved?.lastError && typeof saved.lastError === "object") {
+        this.lastError = saved.lastError;
       }
     } catch {}
 
@@ -104,13 +114,15 @@ class EngineStore {
       console.error(e);
     }
     // Si le mode sauvegardé n'est plus possible dans ce build, retour à Auto.
-    if (this.device === "cuda" && !this.caps.cuda) this.device = "auto";
-    if (this.device === "directml" && !this.caps.directml) this.device = "auto";
-    if (this.device === "webgpu" && !this.caps.webgpu) this.device = "auto";
-    if (this.device === "coreml" && !this.caps.coreml) this.device = "auto";
+    if (this.device === "gpu" && !this.caps.gpu) this.device = "auto";
 
     try {
       await invoke("set_local_device", { device: this.device });
+    } catch (e) {
+      console.error(e);
+    }
+    try {
+      await invoke("set_cpu_threads", { threads: this.cpuThreads });
     } catch (e) {
       console.error(e);
     }
@@ -135,7 +147,7 @@ class EngineStore {
 
   private save() {
     try {
-      localStorage.setItem(KEY, JSON.stringify({ servers: this.servers, activeId: this.activeId, device: this.device }));
+      localStorage.setItem(KEY, JSON.stringify({ servers: this.servers, activeId: this.activeId, device: this.device, cpuThreads: this.cpuThreads, lastError: this.lastError }));
     } catch {}
   }
 
@@ -164,18 +176,52 @@ class EngineStore {
     this.save();
   }
 
-  setActive(id: string) {
+  async setActive(id: string) {
+    const prev = this.activeId;
     this.activeId = id;
     this.save();
-    this.check(id);
+    // Quitter un modèle local libère sa mémoire (le slot ne garde qu'un modèle).
+    if (isLocalKey(prev) && prev !== id) {
+      try {
+        await invoke("unload_local_model", { model: null });
+      } catch (e) {
+        console.error(e);
+      }
+      if (this.status[prev]?.state === "online") {
+        this.status[prev] = { state: "unknown", message: "Non chargé" };
+      }
+    }
+    await this.check(id);
   }
 
-  /** « auto » : GPU si disponible, sinon CPU ; « cpu » : CPU imposé. Recharge le modèle local actif. */
+  /** Décharge un modèle local précis (libère la RAM). Sans effet s'il n'est pas chargé. */
+  async unmount(id: string) {
+    try {
+      const wasLoaded = await invoke<boolean>("unload_local_model", { model: folderOf(id) });
+      if (wasLoaded) this.status[id] = { state: "unknown", message: "Non chargé" };
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  /** « auto » : GPU si disponible, sinon CPU ; « gpu » : GPU requis ; « cpu » : CPU imposé. Recharge le modèle local actif. */
   async setDevice(device: Device) {
     this.device = device;
     this.save();
     try {
       await invoke("set_local_device", { device });
+    } catch (e) {
+      console.error(e);
+    }
+    if (isLocalKey(this.activeId)) this.load(this.activeId);
+  }
+
+  /** Threads CPU (0 = auto, sinon 1–64). Recharge le modèle local actif. */
+  async setCpuThreads(threads: number) {
+    this.cpuThreads = Math.min(64, Math.max(0, Math.round(threads)));
+    this.save();
+    try {
+      await invoke("set_cpu_threads", { threads: this.cpuThreads });
     } catch (e) {
       console.error(e);
     }
@@ -194,6 +240,8 @@ class EngineStore {
     const id = localKey(folder);
     await invoke("remove_local_model", { model: folder });
     delete this.status[id];
+    delete this.lastError[id];
+    this.save();
     await this.refreshLocals();
     if (this.activeId === id) {
       this.activeId = this.servers[0]?.id ?? null;
@@ -223,12 +271,22 @@ class EngineStore {
   }
 
   async load(id: string) {
-    this.status[id] = { state: "checking", message: "Chargement du modèle..." };
+    const folder = folderOf(id);
+    const m = this.locals.find((l) => l.id === folder);
+    const big = m && m.sizeMb >= 1500 ? `Gros modèle (~${(m.sizeMb / 1000).toFixed(1)} Go) — ` : "";
+    this.status[id] = { state: "checking", message: `${big}Chargement du modèle...` };
     try {
-      const message = await invoke<string>("load_local_model", { model: folderOf(id) });
+      const message = await invoke<string>("load_local_model", { model: folder });
       this.status[id] = { state: "online", message };
+      if (this.lastError[id]) {
+        delete this.lastError[id];
+        this.save();
+      }
     } catch (e) {
-      this.status[id] = { state: "offline", message: String(e) };
+      const message = String(e);
+      this.status[id] = { state: "offline", message };
+      this.lastError[id] = message;
+      this.save();
     }
   }
 }

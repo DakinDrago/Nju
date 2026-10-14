@@ -22,7 +22,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "appimage", "deb", "rpm", "dmg", "app"],
     "createUpdaterArtifacts": true,
     "resources": [
       "ort-dylibs/*"
