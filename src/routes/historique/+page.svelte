@@ -252,7 +252,8 @@
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center gap-2 flex-wrap">
                         <Badge variant="outline" class={cn("gap-1 px-2 py-0.5 text-xs", statusConfig[t.status].color)}>
-                          <svelte:component this={statusConfig[t.status].icon} class="h-2.5 w-2.5" />
+                          {@const StatusIcon = statusConfig[t.status].icon}
+                          <StatusIcon class="h-2.5 w-2.5" />
                           {statusConfig[t.status].label}
                         </Badge>
                         <span class="text-xs text-muted-foreground truncate">{t.engine}</span>

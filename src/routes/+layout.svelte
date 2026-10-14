@@ -8,6 +8,8 @@
   import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "$lib/components/ui/select";
   import { microphone } from "$lib/stores";
   import { settings } from "$lib/settings.svelte";
+  import { updater } from "$lib/updater.svelte";
+  import { toast } from "svelte-sonner";
   import { Mic, Loader2 } from "lucide-svelte";
 
   let { children } = $props();
@@ -21,6 +23,10 @@
     engines.init();
     microphone.loadDevices();
     void settings.init();
+    // Check MAJ silencieux au démarrage (toast seulement si dispo).
+    void updater.checkForUpdates(true).then((found) => {
+      if (found) toast.success(`Mise à jour ${updater.availableVersion} disponible (voir Paramètres)`);
+    });
   });
 </script>
 

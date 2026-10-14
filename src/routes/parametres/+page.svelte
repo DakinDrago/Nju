@@ -1,15 +1,47 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Button } from "$lib/components/ui/button";
   import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "$lib/components/ui/card";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { Switch } from "$lib/components/ui/switch";
   import { Separator } from "$lib/components/ui/separator";
-  import { Sun, Moon, Monitor, Keyboard, Mic, Database, SlidersHorizontal, RotateCcw, Save } from "lucide-svelte";
+  import { Sun, Moon, Monitor, Keyboard, Mic, Database, SlidersHorizontal, RotateCcw, Save, RefreshCw, Download } from "lucide-svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { toast } from "svelte-sonner";
   import { theme, type Theme } from "$lib/theme.svelte";
   import { settings } from "$lib/settings.svelte";
+  import { updater } from "$lib/updater.svelte";
+  import pkg from "../../../package.json";
+
+  let appVersion = $state(pkg.version);
+
+  onMount(async () => {
+    try {
+      appVersion = await getVersion();
+    } catch {
+      appVersion = pkg.version;
+    }
+    // Vérification silencieuse : ne toast que si une MAJ est dispo.
+    try {
+      await updater.checkForUpdates(true);
+    } catch {
+      // Ignoré (hors Tauri / hors ligne)
+    }
+  });
+
+  async function checkUpdatesManual() {
+    const found = await updater.checkForUpdates(false);
+    if (found) toast.success(`Mise à jour ${updater.availableVersion} disponible`);
+    else if (updater.status === "up-to-date") toast.success("Déjà à jour");
+    else if (updater.status === "error") toast.error("Échec de la vérification : " + (updater.error ?? ""));
+  }
+
+  async function installUpdate() {
+    await updater.downloadAndInstall();
+    if (updater.status === "error") toast.error("Échec de l'installation : " + (updater.error ?? ""));
+  }
 
   const options: { value: Theme; label: string; icon: typeof Sun }[] = [
     { value: "light", label: "Clair", icon: Sun },
@@ -267,13 +299,63 @@
 
   <Card>
     <CardHeader>
+      <CardTitle class="flex items-center gap-2"><RefreshCw class="h-4 w-4" /> Mises à jour</CardTitle>
+      <CardDescription class="text-xs">Version {appVersion} — canal stable GitHub Releases</CardDescription>
+    </CardHeader>
+    <CardContent class="space-y-3 text-sm">
+      {#if updater.status === "checking"}
+        <p class="text-xs text-muted-foreground">Vérification en cours…</p>
+      {:else if updater.status === "available" || updater.status === "downloading" || updater.status === "ready"}
+        <div class="flex items-center justify-between gap-4">
+          <p class="text-sm">Version {updater.availableVersion} disponible</p>
+          <Button
+            size="sm"
+            onclick={installUpdate}
+            disabled={updater.status === "downloading" || updater.status === "ready"}
+          >
+            <Download class="mr-1 h-3 w-3" />
+            {updater.status === "downloading" ? `Installation… ${updater.progress}%` : updater.status === "ready" ? "Redémarrage…" : "Installer et relancer"}
+          </Button>
+        </div>
+        {#if updater.status === "downloading"}
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div class="h-full rounded-full bg-primary transition-all" style="width: {updater.progress}%"></div>
+          </div>
+        {/if}
+        {#if updater.notes}
+          <p class="text-xs text-muted-foreground whitespace-pre-line">{updater.notes}</p>
+        {/if}
+      {:else if updater.status === "up-to-date"}
+        <div class="flex items-center justify-between gap-4">
+          <p class="text-xs text-muted-foreground">Tu es à jour.</p>
+          <Button variant="ghost" size="sm" onclick={checkUpdatesManual}>Revérifier</Button>
+        </div>
+      {:else if updater.status === "error"}
+        <div class="flex items-center justify-between gap-4">
+          <p class="text-xs text-destructive">Échec : {updater.error}</p>
+          <Button variant="ghost" size="sm" onclick={checkUpdatesManual}>Réessayer</Button>
+        </div>
+      {:else}
+        <div class="flex items-center justify-between gap-4">
+          <p class="text-xs text-muted-foreground">Vérifie si une nouvelle version est publiée.</p>
+          <Button variant="outline" size="sm" onclick={checkUpdatesManual}>
+            <RefreshCw class="mr-1 h-3 w-3" />
+            Vérifier les mises à jour
+          </Button>
+        </div>
+      {/if}
+    </CardContent>
+  </Card>
+
+  <Card>
+    <CardHeader>
       <CardTitle>À propos</CardTitle>
       <CardDescription class="text-xs">Informations sur l'application</CardDescription>
     </CardHeader>
     <CardContent class="space-y-3 text-sm text-muted-foreground">
       <div class="flex justify-between">
         <span>Version</span>
-        <span class="font-mono">0.1.0</span>
+        <span class="font-mono">{appVersion}</span>
       </div>
       <div class="flex justify-between">
         <span>Moteur</span>

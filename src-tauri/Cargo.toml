@@ -1,6 +1,6 @@
 [package]
 name = "to-nju"
-version = "0.1.1"
+version = "0.2.0"
 description = "A speech-to-text app for fe'efe'e"
 authors = ["DakinDrago"]
 edition = "2024"
@@ -41,11 +41,14 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-process = "2"
 
-# Règle GPU : seul CUDA est opt-in explicite (`--features gpu`).
+# Règle GPU : seul CUDA est opt-in explicite (`--features gpu`, builds `-gpu`
+# dédiés via tags `v*-gpu`, pilote NVIDIA requis au runtime).
 # Chaque OS embarque son EP natif PAR DÉFAUT : DirectML (Windows),
-# WebGPU (Linux), CoreML (macOS). `gpu-directml` reste accepté
-# (compatibilité) mais n'est plus nécessaire sur Windows.
+# WebGPU (Linux, .so relinké depuis l'overlay pyke), CoreML (macOS).
+# En build gpu Linux, pas de WebGPU (lib MS -gpu) : ordre CUDA → CPU.
+# `gpu-directml` reste accepté (compatibilité) mais n'est plus nécessaire sur Windows.
 [features]
 gpu = ["ort/cuda"]
 gpu-directml = ["ort/directml"]
@@ -72,3 +75,6 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 # Pas de dist CPU pyke pour x86_64-apple-darwin : Intel Mac = voir build.rs.
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "coreml"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

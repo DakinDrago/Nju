@@ -29,7 +29,10 @@ pub fn copy_model(src: &Path, root: &Path, name: &str, dst: &Path) -> Result<(),
             let path = entry.path();
             if path.is_file() {
                 fs::copy(&path, tmp.join(entry.file_name())).map_err(|e| {
-                    format!("Copie de {} impossible : {e}", entry.file_name().to_string_lossy())
+                    format!(
+                        "Copie de {} impossible : {e}",
+                        entry.file_name().to_string_lossy()
+                    )
                 })?;
             }
         }
@@ -115,7 +118,10 @@ mod tests {
         copy_model(&src, &root, "mms-fmp", &dst).unwrap();
 
         assert!(has_model_files(&dst));
-        assert_eq!(fs::metadata(dst.join("model.onnx.data")).unwrap().len(), 10_000);
+        assert_eq!(
+            fs::metadata(dst.join("model.onnx.data")).unwrap().len(),
+            10_000
+        );
         assert!(!root.join(".mms-fmp.partial").exists());
         assert!(src.exists(), "la source doit rester intacte");
         let _ = fs::remove_dir_all(&t);
@@ -143,7 +149,10 @@ mod tests {
         let dst = root.join("mms-fmp");
 
         link_dir(&src, &dst).unwrap();
-        assert!(has_model_files(&dst), "le lien doit donner accès aux fichiers");
+        assert!(
+            has_model_files(&dst),
+            "le lien doit donner accès aux fichiers"
+        );
 
         remove_model(&dst).unwrap();
         assert!(fs::symlink_metadata(&dst).is_err(), "le lien est supprimé");

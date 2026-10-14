@@ -268,7 +268,7 @@
                     variant="outline"
                     class={cn("gap-1.5 px-2 py-0.5", statusColors[st.state] ?? "bg-gray-400")}
                   >
-                    <span class={`size-1.5 rounded-full ${statusColors[st.state] ?? "bg-gray-400"}`} />
+                    <span class={`size-1.5 rounded-full ${statusColors[st.state] ?? "bg-gray-400"}`}></span>
                     <span class="text-xs capitalize">{st.state}</span>
                   </Badge>
                   <span class="truncate text-sm font-medium">{m.name}</span>

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
@@ -14,12 +14,12 @@ const LANGUAGE: &str = "fmp";
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Transcription {
     pub id: String,
-    pub timestamp: String,        // ISO 8601
-    pub engine: String,           // ex: "local:mms-fmp" ou "server:mon-serveur"
-    pub audio_file: String,       // chemin relatif : "audio/uuid.wav"
+    pub timestamp: String,  // ISO 8601
+    pub engine: String,     // ex: "local:mms-fmp" ou "server:mon-serveur"
+    pub audio_file: String, // chemin relatif : "audio/uuid.wav"
     pub original_text: String,
     #[serde(default)]
-    pub corrected_text: String,   // vide = pas encore corrigé
+    pub corrected_text: String, // vide = pas encore corrigé
     pub duration_sec: f32,
     pub sample_rate: u32,
     #[serde(default)]
@@ -29,9 +29,9 @@ pub struct Transcription {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptionStatus {
-    Original,     // texte original, pas corrigé
-    Pending,      // en attente de correction
-    Corrected,    // corrigé par l'utilisateur
+    Original,  // texte original, pas corrigé
+    Pending,   // en attente de correction
+    Corrected, // corrigé par l'utilisateur
 }
 
 impl Default for TranscriptionStatus {
@@ -53,22 +53,27 @@ impl HistoryState {
             .app_data_dir()
             .map_err(|e| e.to_string())?
             .join("history");
-        let audio_dir = base.clone();  // audio_dir pointe vers la racine history/
+        let audio_dir = base.clone(); // audio_dir pointe vers la racine history/
         let index_path = base.join("index.json");
-        
+
         // Crée le dossier de base et le sous-dossier audio
-        fs::create_dir_all(&base).map_err(|e| format!("Impossible de créer le dossier history: {e}"))?;
+        fs::create_dir_all(&base)
+            .map_err(|e| format!("Impossible de créer le dossier history: {e}"))?;
         let audio_subdir = base.join("audio");
-        fs::create_dir_all(&audio_subdir).map_err(|e| format!("Impossible de créer le dossier audio: {e}"))?;
-        
+        fs::create_dir_all(&audio_subdir)
+            .map_err(|e| format!("Impossible de créer le dossier audio: {e}"))?;
+
         // Vérifie que les dossiers existent vraiment
         if !base.exists() {
             return Err(format!("Dossier history non créé: {}", base.display()));
         }
         if !audio_subdir.exists() {
-            return Err(format!("Dossier audio non créé: {}", audio_subdir.display()));
+            return Err(format!(
+                "Dossier audio non créé: {}",
+                audio_subdir.display()
+            ));
         }
-        
+
         if !index_path.exists() {
             fs::write(&index_path, "[]").map_err(|e| e.to_string())?;
         }
@@ -80,13 +85,19 @@ impl HistoryState {
     }
 
     fn load_index(&self) -> Result<Vec<Transcription>, String> {
-        let _guard = self.lock.lock().map_err(|_| "Verrou historique indisponible".to_string())?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "Verrou historique indisponible".to_string())?;
         let content = fs::read_to_string(&self.index_path).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).map_err(|e| e.to_string())
     }
 
     fn save_index(&self, items: &[Transcription]) -> Result<(), String> {
-        let _guard = self.lock.lock().map_err(|_| "Verrou historique indisponible".to_string())?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "Verrou historique indisponible".to_string())?;
         let content = serde_json::to_string_pretty(items).map_err(|e| e.to_string())?;
         fs::write(&self.index_path, content).map_err(|e| e.to_string())
     }
@@ -113,14 +124,19 @@ pub async fn save_transcription(
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
         .collect::<String>();
-    let ext = if ext.is_empty() { "opus".to_string() } else { ext };
+    let ext = if ext.is_empty() {
+        "opus".to_string()
+    } else {
+        ext
+    };
     let audio_file = format!("audio/{id}.{ext}");
     let audio_path = history.audio_dir.join(&audio_file);
 
     // S'assure que le dossier audio existe
     let audio_subdir = history.audio_dir.join("audio");
     if !audio_subdir.exists() {
-        fs::create_dir_all(&audio_subdir).map_err(|e| format!("Création dossier audio échouée: {e}"))?;
+        fs::create_dir_all(&audio_subdir)
+            .map_err(|e| format!("Création dossier audio échouée: {e}"))?;
     }
 
     // Décode et sauve l'audio (OPUS dans conteneur WebM)
@@ -208,7 +224,12 @@ pub async fn delete_transcription(
     if let Some(pos) = items.iter().position(|t| t.id == id) {
         let t = items.remove(pos);
         let audio_path = history.audio_dir.join(&t.audio_file);
-        eprintln!("DEBUG delete: id={}, audio_file={}, audio_path={}", id, t.audio_file, audio_path.display());
+        eprintln!(
+            "DEBUG delete: id={}, audio_file={}, audio_path={}",
+            id,
+            t.audio_file,
+            audio_path.display()
+        );
         if audio_path.exists() {
             eprintln!("DEBUG delete: file exists, deleting...");
             fs::remove_file(audio_path).ok();
@@ -277,11 +298,12 @@ pub async fn export_mms_tsv(
     let tsv_path = export_dir.join("dataset.tsv");
     let mut tsv_content = String::from("path\ttext\tlanguage\tspeaker_id\tduration\n");
     for t in &filtered {
-        let text = if t.status == TranscriptionStatus::Corrected && !t.corrected_text.trim().is_empty() {
-            &t.corrected_text
-        } else {
-            &t.original_text
-        };
+        let text =
+            if t.status == TranscriptionStatus::Corrected && !t.corrected_text.trim().is_empty() {
+                &t.corrected_text
+            } else {
+                &t.original_text
+            };
         let text_escaped = text.replace('\t', " ").replace('\n', " ").replace('\r', "");
         tsv_content.push_str(&format!(
             "{}\t{}\t{}\t{}\t{:.3}\n",
@@ -309,7 +331,11 @@ Généré le {} par Njū'
         total_duration / 60.0,
         language,
         speaker,
-        if corrected_only { "corrigées uniquement" } else { "toutes" },
+        if corrected_only {
+            "corrigées uniquement"
+        } else {
+            "toutes"
+        },
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
     fs::write(export_dir.join("README.md"), readme).map_err(|e| e.to_string())?;
@@ -324,7 +350,10 @@ pub fn init_history(app: &AppHandle) -> Result<HistoryState, String> {
 
 /// Lit un fichier audio et le retourne en base64 (pour lecture dans le navigateur)
 #[tauri::command]
-pub async fn read_audio_file(state: State<'_, HistoryState>, audio_file: String) -> Result<String, String> {
+pub async fn read_audio_file(
+    state: State<'_, HistoryState>,
+    audio_file: String,
+) -> Result<String, String> {
     let history = state.inner();
     let audio_path = history.audio_dir.join(&audio_file);
     if !audio_path.exists() {

@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ort::{session::Session, value::Tensor};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -28,8 +28,8 @@ struct Loaded {
 /// Un seul modèle chargé à la fois (le précédent est libéré avant d'en charger un autre).
 pub struct LocalState {
     slot: Arc<Mutex<Option<Loaded>>>,
-    /// Mode de périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (opt-in
-    /// `--features gpu`), "directml" (Windows), "webgpu" (Linux),
+    /// Mode de périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (Windows/Linux,
+    /// opt-in `--features gpu`), "directml" (Windows), "webgpu" (Linux),
     /// "coreml" (macOS), "cpu" (universel).
     device_mode: Arc<Mutex<String>>,
 }
@@ -97,12 +97,14 @@ fn ort_lib_filename() -> &'static str {
 /// `panic = "abort"` en release → exit 134). Miroir de la résolution d'ort :
 /// 1. `ORT_DYLIB_PATH` (posée par setup() pour les paquets, ou par l'utilisateur),
 /// 2. à côté de l'exécutable (dev / binaire direct, géré par build.rs).
-fn ort_library_path() -> Result<PathBuf, String> {
+pub(crate) fn ort_library_path() -> Result<PathBuf, String> {
     if let Ok(s) = std::env::var("ORT_DYLIB_PATH") {
         if !s.is_empty() {
             let p = PathBuf::from(&s);
             return p.exists().then_some(p).ok_or_else(|| {
-                format!("ONNX Runtime introuvable : ORT_DYLIB_PATH pointe vers un fichier absent ({s})")
+                format!(
+                    "ONNX Runtime introuvable : ORT_DYLIB_PATH pointe vers un fichier absent ({s})"
+                )
             });
         }
     }
@@ -120,20 +122,24 @@ fn ort_library_path() -> Result<PathBuf, String> {
 
 /// Crée la session ONNX. Ordre de préférence selon le mode et l'OS :
 /// - "auto" : Windows (CUDA → DirectML → CPU), Linux (CUDA → WebGPU → CPU), macOS (CoreML → CPU)
-/// - "cuda" : CUDA seulement (opt-in explicite `--features gpu`, sinon erreur)
+/// - "cuda" : CUDA seulement (Windows/Linux, opt-in explicite `--features gpu`, sinon erreur)
 /// - "directml" / "webgpu" / "coreml" : EP natif de l'OS, erreur sinon
 /// - "cpu" : CPU uniquement (universel)
+/// Notes : pas de CUDA sur macOS (même en build gpu) ; en build gpu Linux,
+/// la lib -gpu MS n'a pas l'EP WebGPU (ordre réel : CUDA → CPU).
 fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
     // Vérifie la lib AVANT tout appel ort (voir ort_library_path).
     ort_library_path()?;
 
-    // 1. Essaie CUDA si mode "auto" ou "cuda" (opt-in `--features gpu` uniquement).
+    // 1. Essaie CUDA si mode "auto" ou "cuda" (Windows/Linux + opt-in `--features gpu`).
     if mode == "auto" || mode == "cuda" {
-        #[cfg(feature = "gpu")]
+        #[cfg(all(feature = "gpu", any(target_os = "windows", target_os = "linux")))]
         {
             let attempt = Session::builder()
                 .and_then(|b| {
-                    Ok(b.with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])?)
+                    Ok(b.with_execution_providers([ort::ep::CUDA::default()
+                        .build()
+                        .error_on_failure()])?)
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
@@ -148,7 +154,12 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
                 }
             }
         }
-        #[cfg(not(feature = "gpu"))]
+        // Pas de CUDA sur macOS, même en build gpu (CoreML est l'EP natif).
+        #[cfg(target_os = "macos")]
+        if mode == "cuda" {
+            return Err("Pas de CUDA sur Mac (CoreML est l'EP natif, mode coreml/auto)".into());
+        }
+        #[cfg(all(not(feature = "gpu"), not(target_os = "macos")))]
         if mode == "cuda" {
             return Err("CUDA non compilé (build dédié `--features gpu` requis)".into());
         }
@@ -160,7 +171,9 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
         {
             let attempt = Session::builder()
                 .and_then(|b| {
-                    Ok(b.with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])?)
+                    Ok(b.with_execution_providers([ort::ep::DirectML::default()
+                        .build()
+                        .error_on_failure()])?)
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
@@ -187,7 +200,9 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
         {
             let attempt = Session::builder()
                 .and_then(|b| {
-                    Ok(b.with_execution_providers([ort::ep::WebGPU::default().build().error_on_failure()])?)
+                    Ok(b.with_execution_providers([ort::ep::WebGPU::default()
+                        .build()
+                        .error_on_failure()])?)
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
@@ -214,7 +229,9 @@ fn make_session(path: &Path, mode: &str) -> Result<(Session, String), String> {
         {
             let attempt = Session::builder()
                 .and_then(|b| {
-                    Ok(b.with_execution_providers([ort::ep::CoreML::default().build().error_on_failure()])?)
+                    Ok(b.with_execution_providers([ort::ep::CoreML::default()
+                        .build()
+                        .error_on_failure()])?)
                 })
                 .and_then(|mut b| b.commit_from_file(path));
             match attempt {
@@ -348,9 +365,15 @@ pub async fn load_local_model(
 ) -> Result<String, String> {
     let dir = model_dir(&app, &model)?;
     let slot = state.slot.clone();
-    let mode = state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())?.clone();
+    let mode = state
+        .device_mode
+        .lock()
+        .map_err(|_| "Verrou device_mode indisponible".to_string())?
+        .clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
         ensure_loaded(&mut guard, &dir, &model, &mode)?;
         let device = guard.as_ref().map(|l| l.device.clone()).unwrap_or_default();
         Ok(format!("Prêt · {device}"))
@@ -370,11 +393,17 @@ pub async fn transcribe_local(
     let dir = model_dir(&app, &model)?;
     let wav = STANDARD.decode(audio_b64).map_err(|e| e.to_string())?;
     let slot = state.slot.clone();
-    let mode = state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())?.clone();
+    let mode = state
+        .device_mode
+        .lock()
+        .map_err(|_| "Verrou device_mode indisponible".to_string())?
+        .clone();
     // Durée max par morceau (réglable dans Paramètres), bornée pour rester raisonnable.
     let chunk_secs = chunk_secs.unwrap_or(MAX_CHUNK_SECS).clamp(5.0, 120.0);
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
         ensure_loaded(&mut guard, &dir, &model, &mode)?;
         let loaded = guard.as_mut().ok_or("Aucun modèle chargé")?;
         transcribe_blocking(loaded, &wav, chunk_secs)
@@ -386,11 +415,16 @@ pub async fn transcribe_local(
 /// Importe un dossier exporté (model.onnx, vocab.json, meta.json) dans le dossier des modèles.
 /// mode = "copy" (copie le modèle dans l'appli) ou "link" (lien : le dossier d'origine doit rester en place).
 #[tauri::command]
-pub async fn import_local_model(app: AppHandle, source: String, mode: String) -> Result<String, String> {
+pub async fn import_local_model(
+    app: AppHandle,
+    source: String,
+    mode: String,
+) -> Result<String, String> {
     let src = PathBuf::from(&source);
     if !src.is_dir() || !fsops::has_model_files(&src) {
         return Err(
-            "Ce dossier n'est pas un modèle exporté (model.onnx, vocab.json et meta.json attendus)".into(),
+            "Ce dossier n'est pas un modèle exporté (model.onnx, vocab.json et meta.json attendus)"
+                .into(),
         );
     }
     let name = src
@@ -400,7 +434,9 @@ pub async fn import_local_model(app: AppHandle, source: String, mode: String) ->
         .to_string();
     let dst = model_dir(&app, &name)?;
     if fs::symlink_metadata(&dst).is_ok() {
-        return Err(format!("Un modèle nommé « {name} » existe déjà : retire-le d'abord"));
+        return Err(format!(
+            "Un modèle nommé « {name} » existe déjà : retire-le d'abord"
+        ));
     }
     let root = models_root(&app)?;
 
@@ -426,7 +462,9 @@ pub async fn remove_local_model(
     let dir = model_dir(&app, &model)?;
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
         if guard.as_ref().is_some_and(|l| l.name == model) {
             *guard = None; // libère le fichier avant de le supprimer
         }
@@ -436,8 +474,8 @@ pub async fn remove_local_model(
     .map_err(|e| e.to_string())?
 }
 
-/// Choisit le périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (opt-in
-/// `--features gpu` uniquement), "directml" (Windows), "webgpu" (Linux),
+/// Choisit le périphérique : "auto" (meilleur dispo selon l'OS), "cuda" (Windows/Linux,
+/// opt-in `--features gpu` uniquement), "directml" (Windows), "webgpu" (Linux),
 /// "coreml" (macOS), "cpu" (universel). Le modèle chargé est libéré pour que
 /// le prochain chargement applique le nouveau choix.
 #[tauri::command]
@@ -445,13 +483,21 @@ pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> R
     // Valide le mode
     let valid_modes = ["auto", "cuda", "directml", "webgpu", "coreml", "cpu"];
     if !valid_modes.contains(&device.as_str()) {
-        return Err(format!("Mode invalide : {device}. Modes valides : {}", valid_modes.join(", ")));
+        return Err(format!(
+            "Mode invalide : {device}. Modes valides : {}",
+            valid_modes.join(", ")
+        ));
     }
-    
-    *state.device_mode.lock().map_err(|_| "Verrou device_mode indisponible".to_string())? = device;
+
+    *state
+        .device_mode
+        .lock()
+        .map_err(|_| "Verrou device_mode indisponible".to_string())? = device;
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let mut guard = slot.lock().map_err(|_| "Verrou du modèle indisponible".to_string())?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Verrou du modèle indisponible".to_string())?;
         *guard = None;
         Ok(())
     })

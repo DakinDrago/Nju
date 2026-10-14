@@ -2,11 +2,11 @@
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 mod ctc;
-mod local;
-mod server;
 mod fsops;
 mod history;
+mod local;
 mod options;
+mod server;
 
 /// Raccourci global (phase 1) : Ctrl+Maj+Espace = démarrer/arrêter la transcription.
 /// Affiché dans l'interface (page Paramètres) ; presse-papiers pour coller ensuite.
@@ -15,6 +15,8 @@ const TOGGLE_SHORTCUT: &str = "Ctrl+Shift+Space";
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -58,7 +60,10 @@ pub fn run() {
             // à côté de l'exécutable (voir build.rs) et ort la trouve seul :
             // on ne touche à rien sauf si la ressource existe vraiment.
             // Doit arriver AVANT tout usage d'ort (chargement paresseux).
-            if std::env::var("ORT_DYLIB_PATH").unwrap_or_default().is_empty() {
+            if std::env::var("ORT_DYLIB_PATH")
+                .unwrap_or_default()
+                .is_empty()
+            {
                 if let Ok(res_dir) = app.path().resource_dir() {
                     let name = if cfg!(target_os = "windows") {
                         "onnxruntime.dll"
@@ -77,15 +82,18 @@ pub fn run() {
 
             // Raccourci global par défaut (l'interface applique ensuite les réglages
             // sauvegardés via `set_hotkey`). Échec non bloquant (Wayland, conflit...).
-            if let Err(e) = app.global_shortcut().on_shortcut(TOGGLE_SHORTCUT, |app, _shortcut, event| {
-                if event.state == ShortcutState::Pressed {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    let _ = app.emit("toggle-recording", ());
-                }
-            }) {
+            if let Err(e) =
+                app.global_shortcut()
+                    .on_shortcut(TOGGLE_SHORTCUT, |app, _shortcut, event| {
+                        if event.state == ShortcutState::Pressed {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                            let _ = app.emit("toggle-recording", ());
+                        }
+                    })
+            {
                 eprintln!("Raccourci global '{TOGGLE_SHORTCUT}' non enregistré : {e}");
             }
 
