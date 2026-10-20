@@ -127,7 +127,8 @@ const WEBGPU_STATIC_LIB: &str = "libonnxruntime.a";
 fn staging_recipe() -> &'static str {
     let target = env::var("TARGET").unwrap_or_default();
     match target.as_str() {
-        "x86_64-unknown-linux-gnu" => "relink-webgpu-v2",
+        // v3 : pile non exécutable garantie (-z noexecstack + patch ELF PF_X).
+        "x86_64-unknown-linux-gnu" => "relink-webgpu-v3",
         _ => "v0",
     }
 }
@@ -214,6 +215,10 @@ fn relink_shared_inner(a_bytes: &[u8], dawn_bytes: &[u8], dir: &Path) -> Result<
         .arg("libonnxruntime.a")
         .arg(dir.join("libwebgpu_dawn.so"))
         .arg("-Wl,-rpath,$ORIGIN")
+        // Pile NON exécutable : sans ce drapeau, certains linkers (CI) marquent
+        // PT_GNU_STACK RWE, et les noyaux récents (Ubuntu ≥ 24.10) refusent le
+        // dlopen (« can't enable executable stack ») → crash au démarrage.
+        .arg("-Wl,-z,noexecstack")
         .args(["-lpthread", "-ldl", "-lm"])
         .current_dir(dir)
         .status()
@@ -222,6 +227,46 @@ fn relink_shared_inner(a_bytes: &[u8], dawn_bytes: &[u8], dir: &Path) -> Result<
         return Err("échec édition de lien partagée ORT+WebGPU".into());
     }
     fs::read(dir.join("libonnxruntime.so")).map_err(|e| e.to_string())
+}
+
+/// Pile NON exécutable garantie sur les `.so` Linux stagés.
+///
+/// Les noyaux récents (Ubuntu ≥ 24.10, binfmt_elf) refusent de charger un
+/// objet partagé dont `PT_GNU_STACK` porte le bit exécutable (PF_X) :
+/// dlopen échoue avec EINVAL (« can't enable executable stack ») et, avec
+/// `panic = "abort"` en release, l'app meurt dès le chargement du modèle.
+/// Certains toolchains/linkers (builds CI) émettent RWE sans qu'aucun objet
+/// ne le demande : on force RW sur tout ELF 64 bits little-endian (Linux
+/// x86_64) ; les .dll/.dylib ne portent pas de GNU_STACK, appel sans effet.
+fn clear_exec_stack(bytes: &mut [u8]) {
+    // \x7fELF + EI_CLASS=ELFCLASS64 (2) + EI_DATA=ELFDATA2LSB (1).
+    if bytes.len() < 64
+        || !bytes.starts_with(b"\x7fELF")
+        || bytes[4] != 2
+        || bytes[5] != 1
+    {
+        return;
+    }
+    let rd16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    let rd64 = |o: usize| {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&bytes[o..o + 8]);
+        u64::from_le_bytes(a)
+    };
+    let phoff = rd64(32) as usize; // e_phoff (ELF64, offset 32)
+    let phentsize = rd16(54) as usize; // e_phentsize (ELF64 = 56)
+    let phnum = rd16(56) as usize; // e_phnum
+    for i in 0..phnum {
+        let at = phoff + i * phentsize;
+        if at + phentsize > bytes.len() {
+            break;
+        }
+        // p_type == PT_GNU_STACK (0x6474e551, little-endian) ; p_flags à +4,
+        // son octet de poids faible porte PF_X (0x1).
+        if bytes[at] == 0x51 && bytes[at + 1] == 0xe5 && bytes[at + 2] == 0x74 && bytes[at + 3] == 0x64 {
+            bytes[at + 4] &= !0x1;
+        }
+    }
 }
 
 /// Télécharge (cache persisté) + extrait les libs partagées, puis les place :
@@ -325,6 +370,15 @@ fn ensure_ort_dylib() -> Result<(), String> {
         Err(e) => println!(
             "cargo:warning=ORT WebGPU : relink impossible ({e}), repli sur le .so MS (CPU uniquement)"
         ),
+    }
+
+    // Pile non exécutable garantie sur tout .so stagé (complément défensif du
+    // `-Wl,-z,noexecstack` du relink : couvre aussi le repli .so MS et les
+    // libs providers, quels que soient les binutils du runner).
+    for (name, bytes) in files.iter_mut() {
+        if name.contains(".so") {
+            clear_exec_stack(bytes);
+        }
     }
 
     let place = |dir: &Path| -> Result<(), String> {

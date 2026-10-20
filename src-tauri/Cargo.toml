@@ -1,6 +1,6 @@
 [package]
 name = "to-nju"
-version = "0.2.1"
+version = "0.2.2"
 description = "A speech-to-text app for fe'efe'e"
 authors = ["DakinDrago"]
 edition = "2024"
