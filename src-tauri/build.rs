@@ -17,7 +17,8 @@ fn main() {
 
 /// (URL archive, sha256, format, filtre de sous-dossier) par target rustc.
 /// Plusieurs archives possibles (ex. Linux : base CPU + overlay WebGPU).
-/// - Windows : NuGet MS DirectML (EP natif inclus) ;
+/// - Windows : NuGet MS DirectML (EP natif inclus) + `DirectML.dll` 1.15.4
+///   (la DLL système de Windows 10 est trop ancienne pour ORT 1.22) ;
 /// - Linux : tgz MS officiel (base CPU, repli) + overlay pyke +webgpu : le .so
 ///   officiel MS ne contient PAS l'EP WebGPU, on relinke donc un .so partagé
 ///   depuis le `libonnxruntime.a` statique de l'overlay (EP compilé dedans) ;
@@ -33,19 +34,38 @@ fn ort_dists() -> Option<
 > {
     let target = env::var("TARGET").unwrap_or_default();
     match target.as_str() {
-        // Windows x64 : NuGet DirectML (onnxruntime.dll avec EP natif + providers_shared).
-        "x86_64-pc-windows-msvc" => Some(vec![(
-            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/Microsoft.ML.OnnxRuntime.DirectML.1.22.0.nupkg",
-            "b38d92c31d202d1dc772af9416fe30b6abae8527651e742c380c2d131e5f1817",
-            "zip",
-            Some("runtimes/win-x64/"),
-        )]),
-        "aarch64-pc-windows-msvc" => Some(vec![(
-            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/Microsoft.ML.OnnxRuntime.DirectML.1.22.0.nupkg",
-            "b38d92c31d202d1dc772af9416fe30b6abae8527651e742c380c2d131e5f1817",
-            "zip",
-            Some("runtimes/win-arm64/"),
-        )]),
+        // Windows x64 : ONNX Runtime DirectML (EP natif + providers_shared) et
+        // DirectML.dll 1.15.4, dépendance déclarée par ORT 1.22. Le paquet ORT
+        // ne l'embarque pas et la DLL système de Windows 10 est trop ancienne
+        // (ORT exige DML_FEATURE_LEVEL_5_0, apparu dans DirectML 1.8).
+        "x86_64-pc-windows-msvc" => Some(vec![
+            (
+                "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/Microsoft.ML.OnnxRuntime.DirectML.1.22.0.nupkg",
+                "b38d92c31d202d1dc772af9416fe30b6abae8527651e742c380c2d131e5f1817",
+                "zip",
+                Some("runtimes/win-x64/"),
+            ),
+            (
+                "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+                "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+                "zip",
+                Some("bin/x64-win/"),
+            ),
+        ]),
+        "aarch64-pc-windows-msvc" => Some(vec![
+            (
+                "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/Microsoft.ML.OnnxRuntime.DirectML.1.22.0.nupkg",
+                "b38d92c31d202d1dc772af9416fe30b6abae8527651e742c380c2d131e5f1817",
+                "zip",
+                Some("runtimes/win-arm64/"),
+            ),
+            (
+                "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+                "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+                "zip",
+                Some("bin/arm64-win/"),
+            ),
+        ]),
         // Linux x64 : base MS officielle (repli CPU) + overlay pyke +webgpu.
         // L'overlay contient `libwebgpu_dawn.so` ET `libonnxruntime.a` statique
         // (EP natif compilé dedans, vérifié : symboles onnxruntime::webgpu).
@@ -90,7 +110,11 @@ fn ort_dists() -> Option<
 fn ort_lib_names() -> Vec<&'static str> {
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("windows") {
-        vec!["onnxruntime.dll", "onnxruntime_providers_shared.dll"]
+        vec![
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "DirectML.dll",
+        ]
     } else if target.contains("apple-darwin") || target.contains("macos") {
         vec!["libonnxruntime.dylib"]
     } else {
@@ -108,7 +132,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn is_lib_name(name: &str) -> bool {
     // TensorRT exclu : requiert un TRT système, jamais activé (voir ort_lib_names).
-    if name.contains("tensorrt") {
+    // DirectML.Debug.dll : couche de debug, jamais utilisée à l'exécution.
+    if name.contains("tensorrt") || name.contains("DirectML.Debug") {
         return false;
     }
     name.contains(".dll")
@@ -129,6 +154,8 @@ fn staging_recipe() -> &'static str {
     match target.as_str() {
         // v3 : pile non exécutable garantie (-z noexecstack + patch ELF PF_X).
         "x86_64-unknown-linux-gnu" => "relink-webgpu-v3",
+        // v1 : ajout de DirectML.dll 1.15.4 (DLL système trop ancienne sur Win10).
+        "x86_64-pc-windows-msvc" | "aarch64-pc-windows-msvc" => "v1-directml",
         _ => "v0",
     }
 }
@@ -240,11 +267,7 @@ fn relink_shared_inner(a_bytes: &[u8], dawn_bytes: &[u8], dir: &Path) -> Result<
 /// x86_64) ; les .dll/.dylib ne portent pas de GNU_STACK, appel sans effet.
 fn clear_exec_stack(bytes: &mut [u8]) {
     // \x7fELF + EI_CLASS=ELFCLASS64 (2) + EI_DATA=ELFDATA2LSB (1).
-    if bytes.len() < 64
-        || !bytes.starts_with(b"\x7fELF")
-        || bytes[4] != 2
-        || bytes[5] != 1
-    {
+    if bytes.len() < 64 || !bytes.starts_with(b"\x7fELF") || bytes[4] != 2 || bytes[5] != 1 {
         return;
     }
     let rd16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
@@ -263,7 +286,11 @@ fn clear_exec_stack(bytes: &mut [u8]) {
         }
         // p_type == PT_GNU_STACK (0x6474e551, little-endian) ; p_flags à +4,
         // son octet de poids faible porte PF_X (0x1).
-        if bytes[at] == 0x51 && bytes[at + 1] == 0xe5 && bytes[at + 2] == 0x74 && bytes[at + 3] == 0x64 {
+        if bytes[at] == 0x51
+            && bytes[at + 1] == 0xe5
+            && bytes[at + 2] == 0x74
+            && bytes[at + 3] == 0x64
+        {
             bytes[at + 4] &= !0x1;
         }
     }
@@ -402,7 +429,8 @@ fn ensure_ort_dylib() -> Result<(), String> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let is_ort = name.starts_with("libonnxruntime")
                 || name.starts_with("libwebgpu")
-                || name.starts_with("onnxruntime");
+                || name.starts_with("onnxruntime")
+                || name.starts_with("DirectML");
             if is_ort && !files.iter().any(|(n, _)| n == &name) {
                 let _ = fs::remove_file(entry.path());
             }

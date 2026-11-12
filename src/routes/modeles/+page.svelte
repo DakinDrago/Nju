@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { engines, dotClass, localKey, type ServerEngine } from "$lib/engines.svelte";
+  import { engines, dotClass, localKey, type EngineState, type ServerEngine } from "$lib/engines.svelte";
   import { settings } from "$lib/settings.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "$lib/components/ui/card";
@@ -115,13 +115,12 @@
     }
   }
 
-  const statusColors = {
-    ready: "bg-green-500",
-    loading: "bg-yellow-500",
-    error: "bg-red-500",
-    offline: "bg-gray-400",
-    unknown: "bg-gray-400",
-  } as const;
+  const statusLabels: Record<EngineState, string> = {
+    unknown: "Non chargé",
+    checking: "Chargement…",
+    online: "En ligne",
+    offline: "Hors ligne",
+  };
 </script>
 
 <Toaster />
@@ -156,7 +155,7 @@
         {/if}
       </Button>
 
-      <div class="inline-flex gap-1 rounded-lg border border-border bg-card p-1 text-xs" role="group" aria-label="Mode d'import">
+      <div class="inline-flex gap-1 rounded-lg border border-border bg-card p-0.5 text-xs" role="group" aria-label="Mode d'import">
         <Button
           variant={importMode === "copy" ? "default" : "ghost"}
           size="sm"
@@ -182,7 +181,7 @@
 
     <div class="flex flex-wrap items-center gap-3">
       <span class="text-xs text-muted-foreground">Calcul</span>
-      <div class="inline-flex items-center gap-2 rounded-lg border border-border bg-card p-1">
+      <div class="inline-flex items-center gap-2 rounded-lg border border-border bg-card p-0.5">
         <Button
           variant={engines.device === "auto" ? "default" : "ghost"}
           size="sm"
@@ -213,7 +212,7 @@
       <label class="inline-flex items-center gap-2 text-xs text-muted-foreground">
         Threads
         <select
-          class="rounded-md border border-border bg-card px-2 py-1 text-xs"
+          class="h-8 rounded-md border border-border bg-card px-2 text-xs"
           value={engines.cpuThreads}
           onchange={(e) => engines.setCpuThreads(Number((e.target as HTMLSelectElement).value))}
           aria-label="Threads CPU"
@@ -227,11 +226,18 @@
     </div>
     <p class="mt-2 text-xs text-muted-foreground">
       Auto : utilise le GPU quand il est disponible, sinon le processeur. Le CPU fonctionne sur tous les ordinateurs.
-      Morceau : {settings.data.chunkSecs} s (réglable dans Paramètres).
-      {#if !engines.caps.gpu}
-        Ce build ne propose que le CPU sur cet ordinateur.
-      {/if}
     </p>
+    <p class="mt-1 text-xs text-muted-foreground">
+      Morceau : {settings.data.chunkSecs} s (réglable dans Paramètres).
+    </p>
+    {#if engines.deviceNotice}
+      <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">{engines.deviceNotice}</p>
+    {:else if !engines.caps.gpu}
+      <p class="mt-1 text-xs text-muted-foreground">
+        GPU indisponible : {engines.caps.gpuReason ?? "aucun GPU compatible détecté."}
+        Le CPU reste disponible.
+      </p>
+    {/if}
 
     <div class="space-y-3">
       {#each engines.locals as m (m.id)}
@@ -243,12 +249,9 @@
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <Badge
-                    variant="outline"
-                    class={cn("gap-1.5 px-2 py-0.5", statusColors[st.state] ?? "bg-gray-400")}
-                  >
-                    <span class={`size-1.5 rounded-full ${statusColors[st.state] ?? "bg-gray-400"}`}></span>
-                    <span class="text-xs capitalize">{st.state}</span>
+                  <Badge variant="outline" class="gap-1.5 px-2 py-0.5">
+                    <span class={`size-1.5 shrink-0 rounded-full ${dotClass[st.state]}`}></span>
+                    <span class="text-xs">{statusLabels[st.state]}</span>
                   </Badge>
                   <span class="truncate text-sm font-medium">{m.name}</span>
                   {#if active}
@@ -412,12 +415,9 @@
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
-                <Badge
-                  variant="outline"
-                  class={cn("gap-1.5 px-2 py-0.5", statusColors[st.state] ?? "bg-gray-400")}
-                >
-                  <span class={`size-1.5 rounded-full ${statusColors[st.state] ?? "bg-gray-400"}`}></span>
-                  <span class="text-xs capitalize">{st.state}</span>
+                <Badge variant="outline" class="gap-1.5 px-2 py-0.5">
+                  <span class={`size-1.5 shrink-0 rounded-full ${dotClass[st.state]}`}></span>
+                  <span class="text-xs">{statusLabels[st.state]}</span>
                 </Badge>
                 <span class="truncate text-sm font-medium">{s.name}</span>
                 {#if active}

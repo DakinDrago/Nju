@@ -61,3 +61,16 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Créer le paquet macOS (.pkg)
+        if: runner.os == 'macOS'
+        run: bash scripts/make-macos-pkg.sh "${{ matrix.target }}"
+
+      - name: Publier le paquet macOS (.pkg)
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "src-tauri/target/${{ matrix.target }}/release/bundle/pkg/"*.pkg \
+            --clobber

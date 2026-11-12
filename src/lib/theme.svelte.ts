@@ -4,6 +4,8 @@ const KEY = "nju-theme";
 
 class ThemeStore {
   mode = $state<Theme>("system");
+  /** Thème effectif (mode explicite ou préférence système), utilisé par les composants. */
+  isDark = $state(false);
 
   init() {
     try {
@@ -26,6 +28,7 @@ class ThemeStore {
     const dark =
       this.mode === "dark" ||
       (this.mode === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    this.isDark = dark;
     document.documentElement.classList.toggle("dark", dark);
   }
 }

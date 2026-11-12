@@ -47,29 +47,59 @@
   let mediaRecorder: MediaRecorder | null = null;
   let recordedChunks: Blob[] = [];
   let recordStartTime = 0;
+  let startToken = 0;
+  let acquireToken = 0;
 
   // Check if model is loaded
   const modelLoaded = $derived(engines.active && engines.status[engines.active.id]?.state === "online");
   const modelStatus = $derived(engines.active ? engines.status[engines.active.id]?.state : "unknown");
 
-  async function acquireStream(deviceId?: string | null) {
+  /**
+   * Ouvre (ou rouvre) le flux du micro demandé, avec repli sur le micro par
+   * défaut. Les libellés n'étant exposés qu'après autorisation, réénumère les
+   * périphériques en silence après un succès.
+   */
+  async function acquireStream(deviceId?: string | null): Promise<MediaStream | null> {
+    const token = ++acquireToken;
     try {
       stream?.getTracks().forEach((t) => t.stop());
     } catch { /* ignore */ }
+    stream = null;
+
     const constraints: MediaStreamConstraints = deviceId
       ? { audio: { deviceId: { exact: deviceId } } }
       : { audio: true };
+
+    let acquired: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      acquired = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (e) {
       console.warn("Micro sélectionné indisponible, utilisation du micro par défaut:", e);
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
-        status = "Impossible d'accéder au microphone";
         console.error(err);
+        if (token === acquireToken) {
+          stream = null;
+          status = "Impossible d'accéder au microphone";
+        }
+        return null;
       }
     }
+
+    if (!acquired) return null;
+
+    // Une acquisition plus récente a pris le relais : libère ce flux orphelin.
+    if (token !== acquireToken) {
+      acquired.getTracks().forEach((t) => t.stop());
+      return null;
+    }
+
+    stream = acquired;
+    // L'autorisation débloque les libellés des périphériques.
+    void microphone.loadDevices(true);
+    if (status === "Impossible d'accéder au microphone") status = "Prêt";
+    return acquired;
   }
 
   onMount(() => {
@@ -99,13 +129,28 @@
   });
 
   async function start() {
-    if (!stream || recording) return;
-    
+    if (recording) return;
+
+    const token = ++startToken;
+
     if (!modelLoaded) {
       status = "Aucun modèle chargé. Allez dans Modèles pour en sélectionner un.";
       toast.error("Aucun modèle chargé. Allez dans Modèles pour en sélectionner un.");
       return;
     }
+
+    // Micro débranché ou flux interrompu (veille, changement de périphérique) :
+    // réacquérir avant d'enregistrer, sans redémarrer l'application.
+    const hasLiveAudio = !!stream?.getAudioTracks().some((t) => t.readyState === "live");
+    if (!hasLiveAudio) {
+      await acquireStream($microphone || undefined);
+      // Relâchement du bouton ou nouvel essai pendant l'acquisition : abandon.
+      if (token !== startToken) return;
+    }
+
+    // Aucun flux (échec d'acquisition, message déjà affiché) : ne pas démarrer.
+    if (!stream) return;
+    const activeStream = stream;
 
     recordedChunks = [];
     
@@ -116,10 +161,10 @@
         : "";
     
     try {
-      mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorder = new MediaRecorder(activeStream, mimeType ? { mimeType } : undefined);
     } catch (e) {
       console.warn("MediaRecorder fallback:", e);
-      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder = new MediaRecorder(activeStream);
     }
 
     mediaRecorder.ondataavailable = (e) => {
@@ -177,6 +222,10 @@
   }
 
   async function stop() {
+    // Annule aussi un démarrage encore en cours (acquisition asynchrone du
+    // micro) : relâcher le bouton avant la fin ne doit pas lancer un
+    // enregistrement.
+    startToken++;
     if (!recording || !mediaRecorder) return;
     recording = false;
     mediaRecorder.stop();
@@ -301,7 +350,7 @@
   <div class="mb-6 flex items-center justify-center gap-2">
     <DropdownMenu>
       <DropdownMenuTrigger
-        class="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        class="inline-flex h-6 items-center gap-2 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
         aria-label="Choisir le moteur de transcription"
       >
         <span class={`size-2 rounded-full ${dotClass[engineState]}`}></span>
@@ -329,12 +378,26 @@
       </DropdownMenuContent>
     </DropdownMenu>
     
-    {#if !modelLoaded}
-      <div class="inline-flex items-center gap-1.5 rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-1.5 text-sm text-destructive">
-        <AlertCircle class="h-3 w-3 flex-shrink-0" />
-        <span class="text-xs">Modèle non chargé</span>
-      </div>
-    {/if}
+    <div
+      class={`inline-flex h-6 min-w-[9.5rem] items-center justify-center gap-1.5 rounded-full border px-3 text-xs ${
+        modelStatus === "online"
+          ? "border-emerald-600/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-400"
+          : modelStatus === "checking"
+            ? "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-400"
+            : "border-destructive/20 bg-destructive/10 text-destructive"
+      }`}
+    >
+      {#if modelStatus === "online"}
+        <span class="size-1.5 rounded-full bg-emerald-500"></span>
+        Modèle prêt
+      {:else if modelStatus === "checking"}
+        <Loader2 class="h-3 w-3 animate-spin" />
+        Chargement…
+      {:else}
+        <AlertCircle class="h-3 w-3 shrink-0" />
+        Modèle non chargé
+      {/if}
+    </div>
   </div>
 
   <Button
@@ -362,34 +425,33 @@
     </span>
   </Button>
 
-  {#if !recording}
-    <p class="mt-6 min-h-6 text-sm text-muted-foreground">{status}</p>
+  <p class="mt-6 min-h-6 text-sm text-muted-foreground">{status}</p>
+  <div class="mt-2 flex h-7 justify-center">
     {#if transcribing}
-      <Button variant="outline" size="sm" onclick={cancel} class="mt-2">
+      <Button variant="outline" size="sm" onclick={cancel}>
         Annuler
       </Button>
     {/if}
-  {/if}
+  </div>
 
   <section class="mt-10 w-full text-left">
     <Card>
-      <CardHeader class="flex flex-row items-center justify-between">
+      <CardHeader class="flex min-h-8 flex-row items-center justify-between">
         <CardTitle class="text-xs font-medium tracking-wide text-muted-foreground uppercase">Transcription</CardTitle>
-        {#if result}
-          <Button
-            variant="ghost"
-            size="icon"
-            onclick={copyToClipboard}
-            class={copied ? "text-green-500" : ""}
-            aria-label={copied ? "Copié !" : "Copier la transcription"}
-          >
-            {#if copied}
-              <Check class="h-4 w-4 text-green-500" />
-            {:else}
-              <Copy class="h-4 w-4" />
-            {/if}
-          </Button>
-        {/if}
+        <Button
+          variant="ghost"
+          size="icon"
+          onclick={copyToClipboard}
+          class={copied ? "text-emerald-600 dark:text-emerald-400" : ""}
+          aria-label={copied ? "Copié !" : "Copier la transcription"}
+          disabled={!result}
+        >
+          {#if copied}
+            <Check class="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+          {:else}
+            <Copy class="h-4 w-4" />
+          {/if}
+        </Button>
       </CardHeader>
       <CardContent class="min-h-28 text-base leading-relaxed">
         {#if result}

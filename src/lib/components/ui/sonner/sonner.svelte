@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { mode } from "mode-watcher";
 	import { Toaster as Sonner, type ToasterProps as SonnerProps } from "svelte-sonner";
+	import { theme } from "$lib/theme.svelte";
 	import Loader2Icon from '@lucide/svelte/icons/loader-2';
 	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 	import OctagonXIcon from '@lucide/svelte/icons/octagon-x';
@@ -8,10 +8,14 @@
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 
 	let { ...restProps }: SonnerProps = $props();
+
+	// Sonner ne connaît pas notre thème (classe `.dark` gérée par $lib/theme) :
+	// on lui passe le thème effectif pour que les toasts suivent le mode choisi.
+	const sonnerTheme = $derived(theme.isDark ? "dark" : "light");
 </script>
 
 <Sonner
-	theme={mode.current}
+	theme={sonnerTheme}
 	class="toaster group"
 	style="--normal-bg: var(--color-popover); --normal-text: var(--color-popover-foreground); --normal-border: var(--color-border);"
 	toastOptions={{

@@ -63,8 +63,14 @@ webkit2gtk = "2.0"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "webgpu"] }
 
 # DirectML n'existe que sur Windows : EP natif par défaut sur Windows.
+# `preload-dylibs` : charge notre DirectML.dll 1.15.4 avant le delay-load
+# d'onnxruntime.dll (la DLL système de Windows 10 est trop ancienne pour ORT 1.22).
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml", "preload-dylibs"] }
+# Désactivation native des raccourcis navigateur (Ctrl+R, F5, F12...) en release.
+# Versions alignées sur celles déjà tirées par Tauri/Wry (pas de doublon).
+webview2-com = "0.39"
+windows-core = "0.62"
 
 # CoreML (Neural Engine/GPU Apple) : EP natif par défaut sur macOS.
 # Pas de dist CPU pyke pour x86_64-apple-darwin : Intel Mac = voir build.rs.

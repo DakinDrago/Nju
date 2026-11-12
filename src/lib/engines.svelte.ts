@@ -23,6 +23,8 @@ export type Device = "auto" | "gpu" | "cpu";
 /** Ce que le binaire sait faire (voir `get_capabilities` côté Rust). */
 export type Capabilities = {
   gpu: boolean;
+  /** Raison lisible quand `gpu` est false (sonde runtime). */
+  gpuReason: string | null;
   platform: string;
 };
 
@@ -67,7 +69,9 @@ class EngineStore {
   status = $state<Record<string, Status>>({});
   /** Dernier message d'échec par modèle local (persiste au redémarrage). */
   lastError = $state<Record<string, string>>({});
-  caps = $state<Capabilities>({ gpu: false, platform: "" });
+  /** Explication affichée quand le GPU n'est pas utilisable (sonde ou échec au chargement). */
+  deviceNotice = $state<string | null>(null);
+  caps = $state<Capabilities>({ gpu: false, gpuReason: null, platform: "" });
 
   get active(): ActiveEngine | null {
     if (isLocalKey(this.activeId)) {
@@ -114,7 +118,11 @@ class EngineStore {
       console.error(e);
     }
     // Si le mode sauvegardé n'est plus possible dans ce build, retour à Auto.
-    if (this.device === "gpu" && !this.caps.gpu) this.device = "auto";
+    if (this.device === "gpu" && !this.caps.gpu) {
+      this.device = "auto";
+      this.deviceNotice = this.caps.gpuReason ?? "GPU indisponible sur cet ordinateur.";
+      this.save();
+    }
 
     try {
       await invoke("set_local_device", { device: this.device });
@@ -206,14 +214,23 @@ class EngineStore {
 
   /** « auto » : GPU si disponible, sinon CPU ; « gpu » : GPU requis ; « cpu » : CPU imposé. Recharge le modèle local actif. */
   async setDevice(device: Device) {
+    if (device === "gpu" && !this.caps.gpu) {
+      this.deviceNotice = this.caps.gpuReason ?? "GPU indisponible sur cet ordinateur.";
+      return;
+    }
+    const prev = this.device;
     this.device = device;
+    this.deviceNotice = null;
     this.save();
     try {
       await invoke("set_local_device", { device });
     } catch (e) {
       console.error(e);
     }
-    if (isLocalKey(this.activeId)) this.load(this.activeId);
+    // Échec GPU : load() revient au mode précédent (Auto/CPU) et l'explique.
+    if (isLocalKey(this.activeId)) {
+      await this.load(this.activeId, prev === "gpu" ? "auto" : prev);
+    }
   }
 
   /** Threads CPU (0 = auto, sinon 1–64). Recharge le modèle local actif. */
@@ -270,7 +287,8 @@ class EngineStore {
     }
   }
 
-  async load(id: string) {
+  /** Charge un modèle local. Renvoie false en cas d'échec (après repli éventuel). */
+  async load(id: string, gpuFallback: Device = "auto"): Promise<boolean> {
     const folder = folderOf(id);
     const m = this.locals.find((l) => l.id === folder);
     const big = m && m.sizeMb >= 1500 ? `Gros modèle (~${(m.sizeMb / 1000).toFixed(1)} Go) — ` : "";
@@ -282,11 +300,28 @@ class EngineStore {
         delete this.lastError[id];
         this.save();
       }
+      return true;
     } catch (e) {
       const message = String(e);
       this.status[id] = { state: "offline", message };
       this.lastError[id] = message;
       this.save();
+      // GPU demandé mais chargement impossible (DLL/pilote/VRAM) : on revient
+      // automatiquement au mode précédent. En Auto, ORT retombe seul sur le CPU.
+      if (this.device === "gpu") {
+        const back: Device = gpuFallback === "gpu" ? "auto" : gpuFallback;
+        const short = message.length > 160 ? `${message.slice(0, 160)}…` : message;
+        this.device = back;
+        this.deviceNotice = `GPU inutilisable — repli sur ${back === "cpu" ? "le CPU" : "Auto"}. ${short}`;
+        this.save();
+        try {
+          await invoke("set_local_device", { device: back });
+        } catch (err) {
+          console.error(err);
+        }
+        return this.load(id);
+      }
+      return false;
     }
   }
 }

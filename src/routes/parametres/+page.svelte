@@ -6,13 +6,14 @@
   import { Label } from "$lib/components/ui/label";
   import { Switch } from "$lib/components/ui/switch";
   import { Separator } from "$lib/components/ui/separator";
-  import { Sun, Moon, Monitor, Keyboard, Mic, Database, SlidersHorizontal, RotateCcw, Save, RefreshCw, Download } from "lucide-svelte";
+  import { Sun, Moon, Monitor, Keyboard, Mic, Database, SlidersHorizontal, RotateCcw, Save, RefreshCw, Download, Sparkles } from "lucide-svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { toast } from "svelte-sonner";
   import { theme, type Theme } from "$lib/theme.svelte";
   import { settings } from "$lib/settings.svelte";
   import { updater } from "$lib/updater.svelte";
+  import { whatsNew } from "$lib/whats-new.svelte";
   import pkg from "../../../package.json";
 
   let appVersion = $state(pkg.version);
@@ -344,6 +345,14 @@
           </Button>
         </div>
       {/if}
+
+      <div class="flex items-center justify-between gap-4 border-t border-border pt-3">
+        <p class="text-xs text-muted-foreground">Consulter les nouveautés de la version installée.</p>
+        <Button variant="ghost" size="sm" onclick={() => whatsNew.showCurrent()}>
+          <Sparkles class="mr-1 h-3 w-3" />
+          Nouveautés
+        </Button>
+      </div>
     </CardContent>
   </Card>
 

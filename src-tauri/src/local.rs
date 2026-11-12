@@ -183,6 +183,42 @@ fn oom_infer_error(e: impl ToString) -> String {
     }
 }
 
+/// Erreur du mode « GPU requis » : cause lisible + conseil de repli.
+/// Windows/DirectML : traduit les échecs classiques (DLL absente ou trop
+/// ancienne, aucun GPU DirectX 12, pilote incompatible) tout en gardant le
+/// détail ORT pour le diagnostic.
+fn gpu_load_error(detail: &str) -> String {
+    let why: String = detail.chars().take(160).collect();
+    #[cfg(target_os = "windows")]
+    {
+        let m = detail.to_lowercase();
+        let hint = if m.contains("specified module")
+            || m.contains("specified procedure")
+            || m.contains("0x8007007e")
+            || m.contains("0x8007007f")
+        {
+            "DirectML.dll est introuvable ou incompatible (réinstalle l'application)"
+        } else if m.contains("no gpu")
+            || m.contains("no devices detected")
+            || m.contains("dxcore")
+            || m.contains("887a0004")
+        {
+            "aucun GPU compatible DirectX 12 utilisable n'a été détecté"
+        } else if m.contains("feature") || m.contains("e_nointerface") || m.contains("0x80004002") {
+            "le pilote graphique ne prend pas en charge DirectML 5.0 (DirectX 12)"
+        } else {
+            "DirectML n'a pas pu démarrer"
+        };
+        return format!(
+            "GPU indisponible : {hint}. Choisis « CPU » ou « Auto » pour continuer. Détail : {why}"
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("GPU indisponible : {why}. Choisis « CPU » ou « Auto » pour continuer.")
+    }
+}
+
 /// Applique le nombre de threads CPU imposé (None = défaut ORT).
 fn apply_threads(b: SessionBuilder, threads: Option<usize>) -> BuilderResult {
     match threads {
@@ -195,7 +231,11 @@ fn apply_threads(b: SessionBuilder, threads: Option<usize>) -> BuilderResult {
 /// - "auto" : GPU natif de l'OS si disponible, sinon CPU
 /// - "gpu" : GPU natif seulement, erreur sinon
 /// - "cpu" : CPU uniquement (universel)
-fn make_session(path: &Path, mode: &str, threads: Option<usize>) -> Result<(Session, String), String> {
+fn make_session(
+    path: &Path,
+    mode: &str,
+    threads: Option<usize>,
+) -> Result<(Session, String), String> {
     // Vérifie la lib AVANT tout appel ort (voir ort_library_path).
     ort_library_path()?;
 
@@ -220,7 +260,7 @@ fn make_session(path: &Path, mode: &str, threads: Option<usize>) -> Result<(Sess
                     }
                     let why: String = full.chars().take(120).collect();
                     if mode == "gpu" {
-                        return Err(format!("GPU requis mais indisponible : {why}"));
+                        return Err(gpu_load_error(&full));
                     }
                     // mode == "auto" : on continue vers CPU
                     eprintln!("GPU indisponible, fallback CPU : {why}");
@@ -246,7 +286,7 @@ fn make_session(path: &Path, mode: &str, threads: Option<usize>) -> Result<(Sess
                     }
                     let why: String = full.chars().take(120).collect();
                     if mode == "gpu" {
-                        return Err(format!("GPU requis mais indisponible : {why}"));
+                        return Err(gpu_load_error(&full));
                     }
                     // mode == "auto" : on continue vers CPU
                     eprintln!("GPU indisponible, fallback CPU : {why}");
@@ -272,7 +312,7 @@ fn make_session(path: &Path, mode: &str, threads: Option<usize>) -> Result<(Sess
                     }
                     let why: String = full.chars().take(120).collect();
                     if mode == "gpu" {
-                        return Err(format!("GPU requis mais indisponible : {why}"));
+                        return Err(gpu_load_error(&full));
                     }
                     // mode == "auto" : on continue vers CPU
                     eprintln!("GPU indisponible, fallback CPU : {why}");
@@ -373,10 +413,7 @@ fn transcribe_blocking(
     let chunks = ctc::split_chunks(&audio, loaded.meta.sample_rate, chunk_secs);
     let total = chunks.len();
     let emit = |done: usize| {
-        let _ = app.emit(
-            "transcribe-progress",
-            TranscribeProgress { done, total },
-        );
+        let _ = app.emit("transcribe-progress", TranscribeProgress { done, total });
     };
     emit(0);
 
@@ -634,8 +671,12 @@ pub async fn remove_local_model(
 }
 
 /// Choisit le périphérique : "auto" (GPU si disponible, sinon CPU),
-/// "gpu" (GPU requis), "cpu" (universel). Le modèle chargé est libéré pour que
-/// le prochain chargement applique le nouveau choix.
+/// "gpu" (GPU requis), "cpu" (universel). Le modèle chargé est libéré si le
+/// choix change réellement, pour que le prochain chargement l'applique.
+///
+/// Idempotent : au rechargement de la WebView, `engines.init()` réapplique les
+/// mêmes réglages ; ne pas vider le slot dans ce cas, sinon le modèle serait
+/// rechargé depuis le disque et la VRAM perdue.
 #[tauri::command]
 pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> Result<(), String> {
     // Valide le mode
@@ -647,10 +688,22 @@ pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> R
         ));
     }
 
-    *state
-        .device_mode
-        .lock()
-        .map_err(|_| "Verrou device_mode indisponible".to_string())? = device;
+    let changed = {
+        let mut mode = state
+            .device_mode
+            .lock()
+            .map_err(|_| "Verrou device_mode indisponible".to_string())?;
+        if *mode == device {
+            false
+        } else {
+            *mode = device;
+            true
+        }
+    };
+    if !changed {
+        return Ok(());
+    }
+
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut guard = slot
@@ -664,17 +717,37 @@ pub async fn set_local_device(state: State<'_, LocalState>, device: String) -> R
 }
 
 /// Choisit les threads CPU des sessions ONNX : 0 = défaut ORT, sinon 1–64.
-/// Le modèle chargé est libéré pour que le prochain chargement applique le nouveau choix.
+/// Le modèle chargé est libéré si la valeur change réellement, pour que le
+/// prochain chargement l'applique. Idempotent (même principe que
+/// `set_local_device`).
 #[tauri::command]
 pub async fn set_cpu_threads(state: State<'_, LocalState>, threads: u32) -> Result<(), String> {
     if threads > 64 {
-        return Err(format!("Nombre de threads invalide : {threads} (0 = auto, max 64)"));
+        return Err(format!(
+            "Nombre de threads invalide : {threads} (0 = auto, max 64)"
+        ));
     }
-    *state
-        .cpu_threads
-        .lock()
-        .map_err(|_| "Verrou cpu_threads indisponible".to_string())? =
-        if threads == 0 { None } else { Some(threads as usize) };
+    let desired = if threads == 0 {
+        None
+    } else {
+        Some(threads as usize)
+    };
+    let changed = {
+        let mut current = state
+            .cpu_threads
+            .lock()
+            .map_err(|_| "Verrou cpu_threads indisponible".to_string())?;
+        if *current == desired {
+            false
+        } else {
+            *current = desired;
+            true
+        }
+    };
+    if !changed {
+        return Ok(());
+    }
+
     let slot = state.slot.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut guard = slot
