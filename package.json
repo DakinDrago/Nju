@@ -13,7 +13,7 @@
     "tauri": "tauri",
     "build:mac": "tauri build && bash scripts/make-macos-pkg.sh"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2",
